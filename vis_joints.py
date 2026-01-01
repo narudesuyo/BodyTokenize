@@ -72,8 +72,9 @@ def save_kp_mp4(kp_TJ3: np.ndarray, save_path: str, fps: int = 20, title: str = 
 
 
 def main():
+    data_base_dir = os.getenv("DATA_DIR")
     dataset = MotionDataset(
-        pt_path="/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt",
+        pt_path=f"{data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt",
         to_torch=True,
         feet_thre=0.002,
         keys=None,
@@ -89,7 +90,7 @@ def main():
 
     for i in range(num_samples):
         x = dataset[i]
-        path = "/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_new.pt/new_joints/iiith_cooking_135_2___7002___7104.npy"
+        path = f"{data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_new.pt/new_joints/iiith_cooking_135_2___7002___7104.npy"
         j_gt = np.load(path)
         print(f"j_gt shape: {j_gt.shape}")
         kp = x["kp"]  # torch tensor

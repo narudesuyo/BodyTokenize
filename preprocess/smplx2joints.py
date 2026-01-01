@@ -166,8 +166,8 @@ def main(in_pt, out_pt, device="cuda:0", gender="neutral"):
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in_pt", default="/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train.pt")
-    ap.add_argument("--out_pt", default="/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_new.pt")
+    ap.add_argument("--in_pt", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train.pt")
+    ap.add_argument("--out_pt", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_new.pt")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--gender", default="neutral")
     args = ap.parse_args()

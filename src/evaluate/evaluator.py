@@ -1,6 +1,6 @@
 import torch
 import os, sys
-sys.path.append(os.getcwd())
+sys.path.append(".")
 import numpy as np
 from torch.utils.data import DataLoader
 from src.dataset.dataloader import MotionDataset

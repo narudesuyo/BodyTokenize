@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import sys
-sys.path.append("/large/naru/EgoHand/BodyTokenize")
+sys.path.append(".")
 from common.skeleton import Skeleton
 from common.quaternion import (
     qbetween_np, qrot_np, qfix, qmul_np, qinv_np,
@@ -523,8 +523,8 @@ def main(in_pt: str, out_root: str, feet_thre: float = 0.002, limit: int = -1):
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--in_pt", default="/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt", help="ee_train_joints.pt (dict with kp3d)")
-    ap.add_argument("--out_root", default="/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_motion_representation", help="output root dir (will create new_joint_vecs/ new_joints/)")
+    ap.add_argument("--in_pt", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt", help="ee_train_joints.pt (dict with kp3d)")
+    ap.add_argument("--out_root", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_motion_representation", help="output root dir (will create new_joint_vecs/ new_joints/)")
     ap.add_argument("--feet_thre", type=float, default=0.002)
     ap.add_argument("--limit", type=int, default=-1, help="process only first N keys (debug)")
     args = ap.parse_args()
@@ -544,7 +544,7 @@ if __name__ == "__main__":
 # import torch
 # from tqdm import tqdm
 
-# sys.path.append("/large/naru/EgoHand/BodyTokenize")
+# sys.path.append(".")
 # from common.skeleton import Skeleton
 # from common.quaternion import (
 #     qbetween_np, qrot_np, qfix, qmul_np, qinv_np,
@@ -1006,8 +1006,8 @@ if __name__ == "__main__":
 # if __name__ == "__main__":
 #     import argparse
 #     ap = argparse.ArgumentParser()
-#     ap.add_argument("--in_pt", default="/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt")
-#     ap.add_argument("--out_root", default="/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_new.pt")
+#     ap.add_argument("--in_pt", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt")
+#     ap.add_argument("--out_root", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_new.pt")
 #     ap.add_argument("--feet_thre", type=float, default=0.002)
 #     ap.add_argument("--limit", type=int, default=-1)
 #     ap.add_argument("--device", default="cuda:0")

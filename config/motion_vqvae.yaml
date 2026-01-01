@@ -1,4 +1,6 @@
 # data
+data_base_dir: /large/naru/EgoHand/data/
+
 data_dir: /large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt
 data_dir_eval: /large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_val_joints.pt
 pattern: "*.npy"

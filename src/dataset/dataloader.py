@@ -100,14 +100,14 @@
 
 # if __name__ == "__main__":
 #     ds = Motion623SplitDataset(
-#     "/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_motion_representation/new_joint_vecs",
+#     f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_motion_representation/new_joint_vecs",
 #     mmap=True
 #     )
 
 #     batch0 = ds[0]
 #     print(batch0["body"].shape, batch0["hand"].shape)  # (T,263) (T,360)
 import sys
-sys.path.append("/large/naru/EgoHand/BodyTokenize")
+sys.path.append(".")
 
 import os
 import numpy as np
@@ -423,7 +423,7 @@ class MotionDataset(Dataset):
 
 # if __name__ == "__main__":
 #     ds = MotionDataset(
-#         "/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt",
+#         f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt",
 #         feet_thre=0.002,
 #         clip_len=81,
 #     )
@@ -592,7 +592,7 @@ if __name__ == "__main__":
         return mean_623, var_623, std_623, nframes_used
 
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pt_path", default="/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt")
+    ap.add_argument("--pt_path", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt")
     ap.add_argument("--clip_len", type=int, default=81)   # -> output T = clip_len-1
     ap.add_argument("--batch_size", type=int, default=64)
     ap.add_argument("--num_workers", type=int, default=8)

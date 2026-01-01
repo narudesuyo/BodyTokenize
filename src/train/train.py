@@ -1,5 +1,5 @@
 import sys
-sys.path.append("/large/naru/EgoHand/BodyTokenize")
+sys.path.append(".")
 
 from src.dataset.dataloader import MotionDataset
 from src.evaluate.utils import reconstruct_623_from_body_hand, recover_from_ric
