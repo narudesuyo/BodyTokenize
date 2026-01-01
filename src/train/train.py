@@ -21,6 +21,7 @@ from tqdm import tqdm
 import omegaconf
 from omegaconf import OmegaConf
 import wandb
+from collections import OrderedDict
 
 
 def main():
@@ -93,7 +94,7 @@ def main():
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     # ===== wandb =====
-    wandb.init(project=args.project, name=args.name, config=vars(args))
+    wandb.init(project=args.project, name=args.name, config=OmegaConf.to_container(args, resolve=True))
     wandb.watch(model, log="gradients", log_freq=200)
 
     mean = torch.from_numpy(np.load(args.mean_path)).to(device)

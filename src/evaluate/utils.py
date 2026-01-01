@@ -5,7 +5,7 @@ import torch
 import argparse
 import sys
 
-sys.path.append("/large/naru/EgoHand/BodyTokenize")
+sys.path.append(".")
 from src.model.vqvae import H2VQ
 from src.dataset.dataloader import MotionDataset
 
@@ -19,7 +19,6 @@ import numpy as np
 import torch
 
 import torch
-from src.util.utils import load_config
 
 def reconstruct_623_from_body_hand(mb: torch.Tensor, mh: torch.Tensor):
     """
