@@ -1,19 +1,13 @@
-import yaml
-from types import SimpleNamespace
+
 import random
 import numpy as np
 import torch
-
-def load_config(path):
-    with open(path, "r") as f:
-        cfg = yaml.safe_load(f)
-    return SimpleNamespace(**cfg)
 
 def count_params(m: torch.nn.Module):
     n_all = sum(p.numel() for p in m.parameters())
     n_train = sum(p.numel() for p in m.parameters() if p.requires_grad)
     return n_all, n_train
-
+    
 def set_seed(seed: int = 0):
     random.seed(seed)
     np.random.seed(seed)

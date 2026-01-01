@@ -14,12 +14,12 @@ import time
 import random
 import argparse
 import numpy as np
-import yaml
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
+import omegaconf
+from omegaconf import OmegaConf
 import wandb
 
 
@@ -29,7 +29,7 @@ def main():
     ap.add_argument("--name", type=str, default=None)
     args_cli = ap.parse_args()
 
-    args = load_config(args_cli.config)
+    args = OmegaConf.load(args_cli.config)
     set_seed(args.seed)
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -37,7 +37,7 @@ def main():
 
     config_save_path = os.path.join(args.save_dir, "config.yaml")
     with open(config_save_path, "w") as f:
-        yaml.dump(args, f)
+        OmegaConf.save(args, config_save_path)
 
     # ===== Dataset / Loader =====
     # args.data_dir が「ptパス」になってる前提（必要ならyaml側で名前変えて）
