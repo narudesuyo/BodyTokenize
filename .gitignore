@@ -1,0 +1,13 @@
+__pycache__/
+.venv/
+*.pt
+*.npy
+*.npz
+*.pth
+*.pt
+*.pkl
+*.mp4
+wandb/
+nohup.out
+runs/
+backup/
