@@ -32,7 +32,7 @@ def build_eval_loader(args, batch_size: int, shuffle: bool = True):
 
 
 @torch.no_grad()
-def evaluate_model(model, dl, args, device, num_batches=50, save_viz_every=0, viz_dir="./eval"):
+def evaluate_model(model, dl, args, device, num_batches=50, save_vis_every=0, viz_dir="./eval", vis=False):
     """
     model: H2VQ_CNNTransformer
     dl: returns {"mB":(B,T,263), "mH":(B,T,360), ...}
@@ -61,10 +61,6 @@ def evaluate_model(model, dl, args, device, num_batches=50, save_viz_every=0, vi
     pplH_sum = pplB_sum = 0.0
     nb = 0
 
-    # optional viz import (heavy)
-    if save_viz_every and save_viz_every > 0:
-        import os as _os
-        _os.makedirs(viz_dir, exist_ok=True)
 
     for it, batch in enumerate(dl):
         if num_batches > 0 and it >= num_batches:
@@ -107,7 +103,7 @@ def evaluate_model(model, dl, args, device, num_batches=50, save_viz_every=0, vi
         j_pr = recover_from_ric(pr623, joints_num=52)
         
 
-        if save_viz_every and save_viz_every > 0 and (it % save_viz_every == 0):
+        if vis:
             part = ["full", "body", "hands", "left_hand", "right_hand"]
             for p in part:
                 visualize_two_motions(

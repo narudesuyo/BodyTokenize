@@ -1,10 +1,8 @@
 # data
-data_base_dir: /large/naru/EgoHand/data/
-
 data_dir: /large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt
 data_dir_eval: /large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_val_joints.pt
 pattern: "*.npy"
-save_dir: ./runs/cnn_large_hand_token_4
+save_dir: ./runs/cnn_large_token_8
 project: h2vq_vqvae
 name: exp_v1_all
 
@@ -30,8 +28,8 @@ code_dim: 512
 K: 512
 ema_decay: 0.99
 alpha_commit: 2
-body_tokens_per_t: 4
-hand_tokens_per_t: 4
+body_tokens_per_t: 8
+hand_tokens_per_t: 8
 body_down: 4
 hand_down: 4
 enc_depth: 6
@@ -58,10 +56,10 @@ dec_hid: 1024
 
 # eval
 eval_every: 1
-eval_num_batches: 5
+eval_num_batches: 10
 eval_batch_size: 32
-eval_vis_dir: ./eval/cnn_large_hand_token_4
-eval_save_viz_every: 10
+eval_vis_dir: ./eval/cnn_large_token_8
+eval_save_vis_every: 10
 
 # normalize
 normalize: true

@@ -215,8 +215,9 @@ def main():
                 args,
                 device=device,
                 num_batches=args.eval_num_batches,
-                save_viz_every=args.eval_save_viz_every,
+                save_vis_every=args.eval_save_vis_every,
                 viz_dir=f"{args.eval_vis_dir}/epoch_{epoch:03d}",
+                vis=True if args.eval_save_vis_every > 0 and (epoch % args.eval_save_vis_every) == 0 else False,
             )
 
             # print
