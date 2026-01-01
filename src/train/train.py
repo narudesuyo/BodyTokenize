@@ -5,7 +5,7 @@ from src.dataset.dataloader import MotionDataset
 from src.evaluate.utils import reconstruct_623_from_body_hand, recover_from_ric
 from src.evaluate.vis import visualize_two_motions
 from src.dataset.collate import collate_stack
-from src.util.utils import load_config, count_params, set_seed, compute_part_losses
+from src.util.utils import count_params, set_seed, compute_part_losses
 from src.evaluate.metric import codebook_stats
 from src.evaluate.evaluator import build_eval_loader, evaluate_model
 from src.train.utils import build_model_from_args
