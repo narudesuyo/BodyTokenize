@@ -20,7 +20,7 @@ import torch
 
 import torch
 
-def reconstruct_623_from_body_hand(mb: torch.Tensor, mh: torch.Tensor):
+def reconstruct_623_from_body_hand(mb: torch.Tensor, mh: torch.Tensor, include_fingertips: bool = False):
     """
     mb: (B,T,263)
     mh: (B,T,360)
@@ -40,25 +40,37 @@ def reconstruct_623_from_body_hand(mb: torch.Tensor, mh: torch.Tensor):
     feet     = mb[..., i:i+4];                    # (B,T,4)
 
     # ---------- split hand ----------
-    j = 0
-    ric_hand = mh[..., j:j+90].view(B,T,30,3); j += 90
-    rot_hand = mh[..., j:j+180].view(B,T,30,6); j += 180
-    vel_hand = mh[..., j:j+90].view(B,T,30,3); j += 90
+    if include_fingertips:
+        j = 0
+        ric_hand = mh[..., j:j+120].view(B,T,40,3); j += 120
+        rot_hand = mh[..., j:j+240].view(B,T,40,6); j += 240
+        vel_hand = mh[..., j:j+120].view(B,T,40,3); j += 120
+        NO_ROOT_J = 61
+    else:
+        NO_ROOT_J = 51
+        j = 0
+        ric_hand = mh[..., j:j+90].view(B,T,30,3); j += 90
+        rot_hand = mh[..., j:j+180].view(B,T,30,6); j += 180
+        vel_hand = mh[..., j:j+90].view(B,T,30,3); j += 90    
 
     # ---------- reassemble original order ----------
     # ric: 51 = body(21) + hand(30)
-    ric = torch.cat([ric_body, ric_hand], dim=2).reshape(B,T,51*3)
+    ric = torch.cat([ric_body, ric_hand], dim=2).reshape(B,T,NO_ROOT_J*3)
 
     # rot: 51 = body(21) + hand(30)
-    rot = torch.cat([rot_body, rot_hand], dim=2).reshape(B,T,51*6)
+    rot = torch.cat([rot_body, rot_hand], dim=2).reshape(B,T,NO_ROOT_J*6)
 
     # vel: 52 = body(root+21) + hand(30)
-    vel = torch.cat([vel_body, vel_hand], dim=2).reshape(B,T,52*3)
+    vel = torch.cat([vel_body, vel_hand], dim=2).reshape(B,T,(NO_ROOT_J+1)*3)
 
     # ---------- final concat ----------
     x623 = torch.cat([root, ric, rot, vel, feet], dim=-1)
 
-    assert x623.shape[-1] == 623
+    if include_fingertips:
+        assert x623.shape[-1] == 743
+    else:
+        assert x623.shape[-1] == 623
+
     return x623
 
 
@@ -101,21 +113,6 @@ def collate_crop_pad(batch, T0: int):
 
     return {"mB": mB, "mH": mH, "mask": mask, "paths": paths}
 
-
-@torch.no_grad()
-def codebook_stats(idx: torch.Tensor, K: int):
-    """
-    idx: [B,T,tok] (int64) or [B, tok, T] etc -> flatten anyway
-    """
-    flat = idx.reshape(-1)
-    hist = torch.bincount(flat, minlength=K).float()
-    p = hist / (hist.sum() + 1e-8)
-    usage = (hist > 0).float().mean().item()
-    perplexity = torch.exp(-(p * (p + 1e-12).log()).sum()).item()
-    return usage, perplexity
-
-
-
 def recover_root_rot_pos(data_t: torch.Tensor):
     rot_vel = data_t[..., 0]
     r_rot_ang = torch.zeros_like(rot_vel)
@@ -134,11 +131,21 @@ def recover_root_rot_pos(data_t: torch.Tensor):
     return r_rot_quat, r_pos
 
 
-def recover_from_ric(data_t: torch.Tensor, joints_num: int):
+def recover_from_ric(data_t: torch.Tensor, joints_num: int, use_root_loss: bool = True):
     r_rot_quat, r_pos = recover_root_rot_pos(data_t)
+    if not use_root_loss:
+        # translation off
+        r_pos = r_pos.clone()
+        r_pos[..., 0] = 0.0
+        r_pos[..., 2] = 0.0
+        # rotation off (identity quaternion, w=1)
+        r_rot_quat = torch.zeros_like(r_rot_quat)
+        r_rot_quat[..., 0] = 1.0
     positions = data_t[..., 4:(joints_num - 1) * 3 + 4].view(data_t.shape[:-1] + (-1, 3))
-
-    positions = qrot(qinv(r_rot_quat[..., None, :]).expand(positions.shape[:-1] + (4,)), positions)
+    positions = qrot(
+        qinv(r_rot_quat[..., None, :]).expand(positions.shape[:-1] + (4,)),
+        positions
+    )
     positions[..., 0] += r_pos[..., 0:1]
     positions[..., 2] += r_pos[..., 2:3]
     positions = torch.cat([r_pos.unsqueeze(-2), positions], dim=-2)
@@ -198,33 +205,5 @@ def count_params(model):
     n_train = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return n_all, n_train
 
-def batch_procrustes_align(pred, gt, eps=1e-8):
-    """
-    pred, gt: (B, T, J, 3)
-    return: aligned_pred (B, T, J, 3)
-    """
-    B, T, J, _ = pred.shape
-    pred = pred.reshape(B*T, J, 3)
-    gt   = gt.reshape(B*T, J, 3)
 
-    mu_pred = pred.mean(dim=1, keepdim=True)
-    mu_gt   = gt.mean(dim=1, keepdim=True)
 
-    pred_c = pred - mu_pred
-    gt_c   = gt - mu_gt
-
-    H = pred_c.transpose(1, 2) @ gt_c        # (BT,3,3)
-    U, S, Vt = torch.linalg.svd(H)
-
-    R = Vt.transpose(1, 2) @ U.transpose(1, 2)
-
-    # reflection fix
-    det = torch.det(R)
-    Vt[det < 0, -1, :] *= -1
-    R = Vt.transpose(1, 2) @ U.transpose(1, 2)
-
-    var_pred = (pred_c ** 2).sum(dim=(1, 2))
-    scale = (S.sum(dim=1) / (var_pred + eps)).view(-1, 1, 1)
-
-    pred_aligned = scale * (pred_c @ R.transpose(1, 2)) + mu_gt
-    return pred_aligned.view(B, T, J, 3)

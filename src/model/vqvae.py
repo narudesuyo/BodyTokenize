@@ -391,6 +391,8 @@ class H2VQ(nn.Module):
         alpha_root: float = 1.0,
         alpha_body: float = 1.0,
         alpha_hand: float = 1.0,
+        use_root_loss: bool = True,
+        include_fingertips: bool = False,
     ):
         super().__init__()
         assert enc_type_B in ["xformer", "cnn"]
@@ -408,7 +410,8 @@ class H2VQ(nn.Module):
         self.alpha_root = alpha_root
         self.alpha_body = alpha_body
         self.alpha_hand = alpha_hand
-
+        self.use_root_loss = use_root_loss
+        self.include_fingertips = include_fingertips
         hand_out = hand_tokens_per_t * code_dim
         body_out = body_tokens_per_t * code_dim
 
@@ -465,6 +468,22 @@ class H2VQ(nn.Module):
     def _merge_tokens(self, z_tok: torch.Tensor):
         B, Tp, tok, D = z_tok.shape
         return z_tok.view(B, Tp, tok * D)
+    
+    def decode_from_ids(self, idxH: torch.Tensor, idxB: torch.Tensor):
+        zH_q_tok = self.qH.codebook[idxH]
+        zB_q_tok = self.qB.codebook[idxB]
+
+        zH_q = self._merge_tokens(zH_q_tok)
+        zB_q = self._merge_tokens(zB_q_tok)
+
+        z_cat = torch.cat([zB_q, zH_q], dim=-1)
+        recon = self.dec(z_cat.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
+
+        return recon
+
+
+
+
 
     def forward(self, mB: torch.Tensor, mH: torch.Tensor):
         zH = self.encH(mH)  # [B,T', hand_tok*D]
@@ -494,7 +513,10 @@ class H2VQ(nn.Module):
 
         recon_root = recon[:, :, :4]
         target_root = target[:, :, :4]
-        recon_loss_root = F.mse_loss(recon_root, target_root)
+        if self.use_root_loss:
+            recon_loss_root = F.mse_loss(recon_root, target_root)
+        else:
+            recon_loss_root = F.mse_loss(recon[:,:,3:4], target[:,:,3:4])
 
         recon_body = recon[:, :, 4:263-4]
         target_body = target[:, :, 4:263-4]
@@ -564,5 +586,11 @@ if __name__ == "__main__":
     mH = torch.randn(4, 80, 360)
     recon, losses, idx = model(mB, mH)
     print("recon:", recon.shape)
+    print(f"idxH: {idx['idxH'].shape}")
+    print(f"idxB: {idx['idxB'].shape}")
     total_params = sum(p.numel() for p in model.parameters())
     print(f"Total parameters: {total_params:,}")
+    idxH = torch.randint(0, model.K, (4, 80, 4))
+    idxB = torch.randint(0, model.K, (4, 80, 2))
+    recon = model.decode_from_ids(idxH, idxB)
+    print("recon:", recon.shape)

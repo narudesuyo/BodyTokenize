@@ -7,7 +7,7 @@ from src.evaluate.vis import visualize_two_motions
 from src.dataset.collate import collate_stack
 from src.util.utils import count_params, set_seed, compute_part_losses
 from src.evaluate.metric import codebook_stats
-from src.evaluate.evaluator import build_eval_loader, evaluate_model
+from src.evaluate.evaluator import evaluate_model
 from src.train.utils import build_model_from_args
 import os
 import time
@@ -46,17 +46,17 @@ def main():
         pt_path=args.data_dir,            # ★ここがpt
         feet_thre=getattr(args, "feet_thre", 0.002),
         kp_field=getattr(args, "kp_field", "kp3d"),
-        clip_len=getattr(args, "clip_len", 81),          # ★80 crop
+        clip_len=getattr(args, "T", 81),          # ★80 crop
         random_crop=getattr(args, "random_crop", True),  # ★trainならTrue推奨
         pad_if_short=getattr(args, "pad_if_short", True),
+        include_fingertips=getattr(args, "include_fingertips", False),
         to_torch=True,
     )
 
     dl = DataLoader(
         ds,
         batch_size=args.batch_size,
-        # shuffle=True,
-        shuffle=False,
+        shuffle=True,
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True,
@@ -67,9 +67,10 @@ def main():
         pt_path=args.data_dir_eval,
         feet_thre=getattr(args, "feet_thre", 0.002),
         kp_field=getattr(args, "kp_field", "kp3d"),
-        clip_len=getattr(args, "clip_len", 81),
+        clip_len=getattr(args, "T", 81),
         random_crop=False,
         pad_if_short=getattr(args, "pad_if_short", True),
+        include_fingertips=getattr(args, "include_fingertips", False),
         to_torch=True,
     )
     dl_eval = DataLoader(
@@ -109,6 +110,9 @@ def main():
         t0 = time.time()
 
         for it, batch in tqdm(enumerate(dl), desc="Training", leave=False):
+            if args.eval_check:
+                break
+
             mB = batch["mB"].to(device, non_blocking=True)  # (B,T,263)
             mH = batch["mH"].to(device, non_blocking=True)  # (B,T,360)
             motion = torch.cat([mB, mH], dim=-1)
@@ -118,10 +122,10 @@ def main():
             mH = motion[:, :, 263:]
 
             # 念のため shape check（args.T と一致してないと落とす）
-            if mB.shape[1] != args.T or mH.shape[1] != args.T:
+            if mB.shape[1] != (args.T-1) or mH.shape[1] != (args.T-1):
                 raise RuntimeError(
                     f"Time length mismatch: got {mB.shape[1]} but args.T={args.T}. "
-                    f"(dataset clip_len={getattr(args,'clip_len',None)} -> expected T=clip_len-1)"
+                    f"(dataset T={args.T} -> expected T={args.T-1})"
                 )
 
 
@@ -159,7 +163,6 @@ def main():
                     print(f"  root_y: pred={p[3]: .5f} | gt={g[3]: .5f}")
                     print("-" * 40)
                     break
-
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -215,8 +218,7 @@ def main():
                 dl_eval,
                 args,
                 device=device,
-                num_batches=args.eval_num_batches,
-                save_vis_every=args.eval_save_vis_every,
+                num_save_samples=args.eval_num_save_samples,
                 viz_dir=f"{args.eval_vis_dir}/epoch_{epoch:03d}",
                 vis=True if args.eval_save_vis_every > 0 and (epoch % args.eval_save_vis_every) == 0 else False,
             )
@@ -224,23 +226,33 @@ def main():
             # print
             print(
                 f"[E{epoch:03d} EVAL]\n"
-                f"  feat_mse={metrics['feat_mse']:.6f}\n"
-                f"  mpjpe(mm) all/body/lh/rh="
-                f"{metrics['mpjpe_all_mm']:.2f}/"
-                f"{metrics['mpjpe_body_mm']:.2f}/"
-                f"{metrics['mpjpe_lh_mm']:.2f}/"
-                f"{metrics['mpjpe_rh_mm']:.2f}\n"
-                f"  pampjpe(mm) all/body/lh/rh="
-                f"{metrics['pampjpe_all_mm']:.2f}/"
-                f"{metrics['pampjpe_body_mm']:.2f}/"
-                f"{metrics['pampjpe_lh_mm']:.2f}/"
-                f"{metrics['pampjpe_rh_mm']:.2f}\n"
-                f"  codebook H usage/ppl={metrics['usageH']:.3f}/{metrics['pplH']:.1f} "
-                f"B usage/ppl={metrics['usageB']:.3f}/{metrics['pplB']:.1f}"
+                f"  feat_mse={metrics['EVAL/RECON/feat_mse']:.6f}\n"
+                f"  pampjpe(mm)  all/body/lh/rh="
+                f"{metrics['EVAL/PA_MPJPE/all']:.2f}/"
+                f"{metrics['EVAL/PA_MPJPE/body']:.2f}/"
+                f"{metrics['EVAL/PA_MPJPE/lh']:.2f}/"
+                f"{metrics['EVAL/PA_MPJPE/rh']:.2f}\n"
+                f"  wa_mpjpe(mm) all/body/lh/rh="
+                f"{metrics['EVAL/WA_MPJPE/all']:.2f}/"
+                f"{metrics['EVAL/WA_MPJPE/body']:.2f}/"
+                f"{metrics['EVAL/WA_MPJPE/lh']:.2f}/"
+                f"{metrics['EVAL/WA_MPJPE/rh']:.2f}\n"
+                f"  w_mpjpe(mm)  all/body/lh/rh="
+                f"{metrics['EVAL/W_MPJPE/all']:.2f}/"
+                f"{metrics['EVAL/W_MPJPE/body']:.2f}/"
+                f"{metrics['EVAL/W_MPJPE/lh']:.2f}/"
+                f"{metrics['EVAL/W_MPJPE/rh']:.2f}\n"
+                f"  rte(mm)      root/lh/rh="
+                f"{metrics['EVAL/RTE/root']:.2f}/"
+                f"{metrics['EVAL/RTE/lh_wrist']:.2f}/"
+                f"{metrics['EVAL/RTE/rh_wrist']:.2f}\n"
+                f"  accel(mm/s^2) all={metrics['EVAL/ACCEL/all']:.2f}\n"
+                f"  codebook H usage/ppl={metrics['EVAL/CODEBOOK/H_usage']:.3f}/{metrics['EVAL/CODEBOOK/H_ppl']:.1f} "
+                f"B usage/ppl={metrics['EVAL/CODEBOOK/B_usage']:.3f}/{metrics['EVAL/CODEBOOK/B_ppl']:.1f}"
             )
 
             # wandb
-            wandb.log({f"eval/{k}": v for k, v in metrics.items()}, step=global_step)
+            wandb.log(metrics, step=global_step)
 
             model.train()
 

@@ -3,13 +3,28 @@ import copy
 import torch
 import smplx
 from tqdm import tqdm
+from smplx.vertex_ids import vertex_ids
+from smplx.vertex_joint_selector import VertexJointSelector
 import os
 import numpy as np
 import torch
 import trimesh
 # fingertip vertex ids (same as your make_hand_regressor one-hot vertices)
-LEFT_TIP_VERTS  = [5361, 4933, 5058, 5169, 5286]  # index, middle, pinky, ring, thumb
-RIGHT_TIP_VERTS = [8079, 7669, 7794, 7905, 8022]  # index, middle, pinky, ring, thumb
+LEFT_TIP_VERTS  = [5361, 4933, 5058, 5169, 5286]  # thumb, index, middle, pinky, ring
+RIGHT_TIP_VERTS = [8079, 7669, 7794, 7905, 8022]  # thumb, index, middle, pinky, ring
+
+        # 'rthumb':		8079,
+        # 'rindex':		7669,
+        # 'rmiddle':		7794,
+        # 'rring':		7905,
+        # 'rpinky':		8022,
+        # 'lthumb':		5361,
+        # 'lindex':		4933,
+        # 'lmiddle':		5058,
+        # 'lring':		5169,
+        # 'lpinky':		5286,
+# vertex_ids = vertex_ids["smplx"]
+# vertex_selector = VertexJointSelector(vertex_ids=vertex_ids)
 
 @torch.no_grad()
 def append_fingertips_from_vertices(out):
@@ -141,8 +156,8 @@ def smpl_params_to_joints_rot6d_handpca(smplx_layer, smpl_params: dict, device):
         transl=tr,
         pose2rot=True,
     )
-    # save_all_meshes(out, smplx_layer, out_dir="debug/meshes_obj", fmt="obj", stride=1)
-    # out.joints: [T, J, 3]
+    print(f"out.joints shape: {out.vertices.shape}")
+
     joint_w_fingertips = append_fingertips_from_vertices(out)
     return joint_w_fingertips
 
@@ -151,6 +166,7 @@ def main(in_pt, out_pt, device="cuda:0", gender="neutral"):
     smplx_layer = get_smplx_layer(device, gender=gender, hand_pca_comps=12)
 
     new_db = copy.deepcopy(db)
+    l = 0
     for k in tqdm(list(new_db.keys()), desc="add kp3d"):
         item = new_db[k]
         if "smpl_params" not in item:
@@ -167,7 +183,7 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_pt", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train.pt")
-    ap.add_argument("--out_pt", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_new.pt")
+    ap.add_argument("--out_pt", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_newe.pt")
     ap.add_argument("--device", default="cuda:0")
     ap.add_argument("--gender", default="neutral")
     args = ap.parse_args()

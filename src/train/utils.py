@@ -1,11 +1,10 @@
 import torch
 from src.model.vqvae import H2VQ
 def build_model_from_args(args, device):
-    body_in_dim, hand_in_dim = 263, 360
     model = H2VQ(
         T=args.T, 
-        body_in_dim=body_in_dim,
-        hand_in_dim=hand_in_dim,
+        body_in_dim=args.body_in_dim,
+        hand_in_dim=args.hand_in_dim,
         code_dim=args.code_dim,
         K=args.K,
         ema_decay=args.ema_decay,
@@ -32,5 +31,7 @@ def build_model_from_args(args, device):
         alpha_root=args.alpha_root,
         alpha_body=args.alpha_body,
         alpha_hand=args.alpha_hand,        
+        use_root_loss=args.use_root_loss,
+        include_fingertips=args.include_fingertips,
     ).to(device)
     return model

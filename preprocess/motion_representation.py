@@ -112,6 +112,19 @@ def _norm_np(v, eps=1e-8):
     n = np.linalg.norm(v, axis=-1, keepdims=True)
     return v / (n + eps)
 
+
+import numpy as np
+import torch
+
+def mpjpe(a, b):
+    # a,b: (T,J,3)
+    return np.linalg.norm(a - b, axis=-1).mean()
+
+def p95(a, b):
+    e = np.linalg.norm(a - b, axis=-1).reshape(-1)
+    return np.percentile(e, 95)
+
+
 def pick_up_axis_from_geom(kp3d_np, face_joint_indx, FOOT_IDS, eps=1e-8):
     """
     kp3d_np: (T,J,3) numpy
@@ -507,10 +520,21 @@ def main(in_pt: str, out_root: str, feet_thre: float = 0.002, limit: int = -1):
             rec = recover_from_ric(torch.from_numpy(data).unsqueeze(0).float(), JOINTS_NUM)  # (1,T-1,52,3)
             rec = rec.squeeze(0).cpu().numpy()
             jnt_path = os.path.join(out_jnt_dir, f"{name}.npy")
-            np.save(jnt_path, rec)
+            # np.save(jnt_path, rec)
 
             total_frames += data.shape[0]
             ok += 1
+
+            rec = recover_from_ric(torch.from_numpy(data).unsqueeze(0).float(), JOINTS_NUM)
+            rec = rec.squeeze(0).cpu().numpy()          # (T-1,J,3)
+            gt  = global_pos[:-1]   
+            print("MPJPE:", mpjpe(rec, gt))
+            print("P95  :", p95(rec, gt))
+            print("Max  :", np.linalg.norm(rec-gt,axis=-1).max())
+            print(rec.shape, gt.shape)
+            print(rec[0], gt[0])
+            exit()
+
             # l += 1
             # if l > 10:
             #     break
@@ -524,7 +548,7 @@ if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser()
     ap.add_argument("--in_pt", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt", help="ee_train_joints.pt (dict with kp3d)")
-    ap.add_argument("--out_root", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_motion_representation", help="output root dir (will create new_joint_vecs/ new_joints/)")
+    ap.add_argument("--out_root", default=f"{os.getenv('DATA_DIR')}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_motion_representation_", help="output root dir (will create new_joint_vecs/ new_joints/)")
     ap.add_argument("--feet_thre", type=float, default=0.002)
     ap.add_argument("--limit", type=int, default=-1, help="process only first N keys (debug)")
     args = ap.parse_args()

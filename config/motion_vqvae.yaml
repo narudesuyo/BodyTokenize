@@ -1,11 +1,11 @@
 # data
 data_base_dir: /large/naru/EgoHand/data
-data_dir: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints.pt
-data_dir_eval: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_val_joints.pt
+data_dir: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_tips.pt
+data_dir_eval: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_val_joints_tips.pt
 pattern: "*.npy"
-save_dir: ./runs/cnn_large_token_8_300
+save_dir: ./runs/token_40_0115_fingertips
 project: h2vq_vqvae
-name: exp_v1_all
+name: token_40_0115_fingertips
 
 # system
 seed: 0
@@ -13,32 +13,34 @@ device: cuda
 num_workers: 18
 
 # training
-T: 80
+T: 81
 batch_size: 32
-epochs: 300
+epochs: 1000
 lr: 0.00001
 wd: 0.000001
 grad_clip: 1
 log_every: 1
-ckpt_every: 20
+ckpt_every: 100
 joints_loss: false
 joints_loss_weight: 5.0
 
 # model
-code_dim: 512
-K: 512
+
+code_dim: 256
+K: 1024
 ema_decay: 0.99
 alpha_commit: 2
-body_tokens_per_t: 8
-hand_tokens_per_t: 8
-body_down: 4
-hand_down: 4
+body_tokens_per_t: 40
+hand_tokens_per_t: 40
+body_down: 1
+hand_down: 1
 enc_depth: 6
 enc_heads: 8
 mlp_ratio: 4.0
 alpha_root: 5.0
 alpha_body: 1.0
 alpha_hand: 1.0
+use_root_loss: false
 enc_type_B: "cnn"
 enc_type_H: "cnn"
 enc_use_attn_B: False 
@@ -47,22 +49,27 @@ enc_use_pos: False
 enc_post_mlp: False
 
 # cnn
-cnn_width_B: 1024
+cnn_width_B: 256
 cnn_depth_B: 8
-cnn_width_H: 1024
+cnn_width_H: 256
 cnn_depth_H: 8
 cnn_dilation_max: 8
 cnn_drop: 0.0
-dec_hid: 1024
+dec_hid: 256
 
 # eval
 eval_every: 1
-eval_num_batches: 10
+eval_num_save_samples: 10
 eval_batch_size: 32
 eval_vis_dir: ./${save_dir}/eval
-eval_save_vis_every: 10
+eval_save_vis_every: 1
+eval_check: true
 
 # normalize
 normalize: true
-mean_path: ./preprocess/statistics/motion623_mean.npy
-std_path: ./preprocess/statistics/motion623_std.npy
+mean_path: ./preprocess/statistics/motion623_fingertips_mean.npy
+std_path: ./preprocess/statistics/motion623_fingertips_std.npy
+
+include_fingertips: true
+body_in_dim: 263
+hand_in_dim: 480

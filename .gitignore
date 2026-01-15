@@ -11,3 +11,5 @@ wandb/
 nohup.out
 runs/
 backup/
+*.png
+*.jpg

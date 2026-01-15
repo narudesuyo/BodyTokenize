@@ -120,7 +120,7 @@ def process_file(positions: np.ndarray, feet_thre: float, tgt_offsets: torch.Ten
     data = np.concatenate([data, local_vel], axis=-1)
     data = np.concatenate([data, feet_l, feet_r], axis=-1)
 
-    assert data.shape[1] == 623, data.shape
+    # assert data.shape[1] == 623, data.shape
     return data.astype(np.float32)
 
 

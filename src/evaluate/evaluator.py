@@ -1,187 +1,158 @@
 import torch
-import os, sys
+import sys
 sys.path.append(".")
 import numpy as np
-from torch.utils.data import DataLoader
-from src.dataset.dataloader import MotionDataset
-from src.dataset.collate import collate_stack
-from src.evaluate.utils import reconstruct_623_from_body_hand, recover_from_ric, batch_procrustes_align
+from src.evaluate.utils import reconstruct_623_from_body_hand, recover_from_ric
 from src.evaluate.vis import visualize_two_motions
-from src.evaluate.metric import codebook_stats, mpjpe
-
-def build_eval_loader(args, batch_size: int, shuffle: bool = True):
-    ds = MotionDataset(
-        pt_path=args.data_dir,
-        feet_thre=getattr(args, "feet_thre", 0.002),
-        kp_field=getattr(args, "kp_field", "kp3d"),
-        clip_len=getattr(args, "clip_len", 81),
-        random_crop=False,  # ★evalは固定が良い。毎回同じcropにしたいなら dataset側で start=0 等にする
-        pad_if_short=getattr(args, "pad_if_short", True),
-        to_torch=True,
-    )
-    dl = DataLoader(
-        ds,
-        batch_size=batch_size,
-        shuffle=shuffle,
-        num_workers=args.num_workers,
-        pin_memory=True,
-        drop_last=True,
-        collate_fn=collate_stack,
-    )
-    return dl
+from src.evaluate.metric import (
+    codebook_stats,
+    batch_procrustes_align,
+    mpjpe_bt,
+    wa_mpjpe,
+    w_mpjpe_firstk,
+    rte_joint,
+    accel_all_joints,
+)
+from tqdm import tqdm
 
 
 @torch.no_grad()
-def evaluate_model(model, dl, args, device, num_batches=50, save_vis_every=0, viz_dir="./eval", vis=False):
-    """
-    model: H2VQ_CNNTransformer
-    dl: returns {"mB":(B,T,263), "mH":(B,T,360), ...}
-    """
+def evaluate_model(
+    model,
+    dl,
+    args,
+    device,
+    num_save_samples: int = 50,
+    viz_dir: str = "./eval",
+    vis: bool = False,
+    fps: int = 10,
+):
     model.eval()
 
-    BODY = slice(0, 22)
-    LH   = slice(22, 37)
-    RH   = slice(37, 52)
+    parts = {
+        "all":  slice(None),
+        "body": slice(0, 22),
+        "lh":   slice(22, 37),
+        "rh":   slice(37, 52),
+    }
 
-    T = args.T
-    feat_mse_sum = 0.0
+    ROOT_IDX, LH_WRIST_IDX, RH_WRIST_IDX = 0, 20, 21
 
-    frame_count = torch.zeros(T, device=device)
-    mpjpe_all_t_sum  = torch.zeros(T, device=device)
-    mpjpe_body_t_sum = torch.zeros(T, device=device)
-    mpjpe_lh_t_sum   = torch.zeros(T, device=device)
-    mpjpe_rh_t_sum   = torch.zeros(T, device=device)
+    # --- accumulators (sum over batches) ---
+    sums = {f"{m}_{p}": 0.0 for m in ["pampjpe", "wa_mpjpe", "w_mpjpe"] for p in parts.keys()}
+    sums.update({
+        "feat_mse": 0.0,
+        "rte_root": 0.0,
+        "rte_lh_wrist": 0.0,
+        "rte_rh_wrist": 0.0,
+        "accel": 0.0,
+    })
+    cb_stats = {"usageH": 0.0, "pplH": 0.0, "usageB": 0.0, "pplB": 0.0}
 
-    pampjpe_all_t_sum = torch.zeros(T, device=device)
-    pampjpe_body_t_sum = torch.zeros(T, device=device)
-    pampjpe_lh_t_sum = torch.zeros(T, device=device)
-    pampjpe_rh_t_sum = torch.zeros(T, device=device)
-
-    usageH_sum = usageB_sum = 0.0
-    pplH_sum = pplB_sum = 0.0
     nb = 0
 
+    if getattr(args, "normalize", False):
+        mean = torch.from_numpy(np.load(args.mean_path)).to(device)
+        std  = torch.from_numpy(np.load(args.std_path)).to(device)
 
-    for it, batch in enumerate(dl):
-        if num_batches > 0 and it >= num_batches:
-            break
+    for it, batch in tqdm(enumerate(dl), total=len(dl), leave=False):
+        mB = batch["mB"].to(device, non_blocking=True)
+        mH = batch["mH"].to(device, non_blocking=True)
 
-        mB = batch["mB"].to(device, non_blocking=True)  # (B,T,263)
-        mH = batch["mH"].to(device, non_blocking=True)  # (B,T,360)
-
-        if args.normalize:
+        if getattr(args, "normalize", False):
             motion = torch.cat([mB, mH], dim=-1)
-            mean = torch.from_numpy(np.load(args.mean_path)).to(device) 
-            std = torch.from_numpy(np.load(args.std_path)).to(device)
-            motion = (motion - mean) / std
-            mB = motion[:, :, :263]
-            mH = motion[:, :, 263:]
-        recon, losses, idx = model(mB, mH)
+            motion = (motion-mean) / std
+            mB = motion[..., :263]
+            mH = motion[..., 263:]
 
-        if args.normalize:
-            recon = (recon * std + mean)
+        recon, losses, idx = model(mB, mH)   # recon: (B,T,623)
 
-        # (B,T,623)
-        gt_motion = torch.cat([mB, mH], dim=-1)
-        if args.normalize:
-            gt_motion = gt_motion * std + mean
-            mB_gt = gt_motion[:, :, :263]
-            mH_gt = gt_motion[:, :, 263:]
-        else:
-            mB_gt = mB
-            mH_gt = mH
+        # --- denormalize if needed ---
+        gt623 = torch.cat([mB, mH], dim=-1)  # (B,T,623)
+        pr623 = recon
 
-        gt623 = reconstruct_623_from_body_hand(mB_gt, mH_gt)
-        pr623 = reconstruct_623_from_body_hand(recon[:, :, :263], recon[:, :, 263:])
+        if getattr(args, "normalize", False):
+            gt623 = gt623 * std + mean
+            pr623 = pr623 * std + mean
 
-        feat_mse = torch.mean((pr623 - gt623) ** 2)
-        feat_mse_sum += float(feat_mse.item())
+        sums["feat_mse"] += torch.mean((pr623 - gt623) ** 2).item()
 
-        # (B,T,52,3)
-        j_gt = recover_from_ric(gt623, joints_num=52)
-        # j_gt = batch["kp52"][:,:80,:,:].to(j_gt.device)
-        j_pr = recover_from_ric(pr623, joints_num=52)
-        
+        # --- joints (B,T,52,3) ---
+        gt_rec = reconstruct_623_from_body_hand(gt623[..., :263], gt623[..., 263:], include_fingertips=args.include_fingertips)
+        pr_rec = reconstruct_623_from_body_hand(pr623[..., :263], pr623[..., 263:], include_fingertips=args.include_fingertips)
 
-        if vis:
-            part = ["full", "body", "hands", "left_hand", "right_hand"]
-            for p in part:
+        joints_num = 52 if not args.include_fingertips else 62
+
+        j_gt = recover_from_ric(gt_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True))
+        j_pr = recover_from_ric(pr_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True))
+
+        # --- visualize ---
+        if vis and it < num_save_samples:
+            view_names = ["all", "body", "hands", "lh", "rh"]
+            for vname in view_names:
                 visualize_two_motions(
                     j_gt[0], j_pr[0],
-                    save_path=f"{viz_dir}/{it:03d}/{p}.mp4",
-                    fps = 10,
-                    view=p,
+                    save_path=f"{viz_dir}/{it:03d}/{vname}.mp4",
+                    fps=fps,
+                    view=vname,
+                    include_fingertips=args.include_fingertips,
+                    only_gt=args.eval_check,
                 )
 
-        # root align
-        j_gt = j_gt - j_gt[..., :1, :]
-        j_pr = j_pr - j_pr[..., :1, :]
+        # --- pose metrics (PA / WA / W-firstK) ---
+        for name, slc in parts.items():
+            jp_part = j_pr[..., slc, :]
+            jg_part = j_gt[..., slc, :]
 
+            # PA-MPJPE: per-frame Procrustes
+            jp_pa = batch_procrustes_align(jp_part, jg_part)
+            sums[f"pampjpe_{name}"] += mpjpe_bt(jp_pa, jg_part, slice(None)).mean().item()
 
+            # WA: sequence-level Procrustes
+            sums[f"wa_mpjpe_{name}"] += wa_mpjpe(jp_part, jg_part, slice(None)).mean().item()
 
-        j_pr_all_pa = batch_procrustes_align(j_pr, j_gt)
-        j_pr_body_pa = batch_procrustes_align(j_pr[..., BODY, :], j_gt[..., BODY, :])
-        j_pr_lh_pa = batch_procrustes_align(j_pr[..., LH, :], j_gt[..., LH, :])
-        j_pr_rh_pa = batch_procrustes_align(j_pr[..., RH, :], j_gt[..., RH, :])
+            # W: first-K Procrustes (default K=1)
+            sums[f"w_mpjpe_{name}"] += w_mpjpe_firstk(
+                jp_part, jg_part, slice(None),
+                num_align_frames=1
+            ).mean().item()
 
+        # --- trajectory metrics ---
+        sums["rte_root"]      += rte_joint(j_pr, j_gt, ROOT_IDX).mean().item()
+        sums["rte_lh_wrist"]  += rte_joint(j_pr, j_gt, LH_WRIST_IDX).mean().item()
+        sums["rte_rh_wrist"]  += rte_joint(j_pr, j_gt, RH_WRIST_IDX).mean().item()
+        sums["accel"]         += accel_all_joints(j_pr, j_gt, fps=fps).mean().item()
 
-        def mpjpe_bt(jp, jg, slc):
-            d = torch.norm(jp[..., slc, :] - jg[..., slc, :], dim=-1)  # (B,T,Jpart)
-            return d.mean(dim=2)  # (B,T)
-
-        err_all  = mpjpe_bt(j_pr, j_gt, slice(None))
-        err_body = mpjpe_bt(j_pr, j_gt, BODY)
-        err_lh   = mpjpe_bt(j_pr, j_gt, LH)
-        err_rh   = mpjpe_bt(j_pr, j_gt, RH)
-
-        mpjpe_all_t_sum  += err_all.sum(dim=0)
-        mpjpe_body_t_sum += err_body.sum(dim=0)
-        mpjpe_lh_t_sum   += err_lh.sum(dim=0)
-        mpjpe_rh_t_sum   += err_rh.sum(dim=0)
-        frame_count += err_all.shape[0]  # +B
-
-        err_all_pa  = mpjpe_bt(j_pr_all_pa, j_gt, slice(None))
-        err_body_pa = mpjpe_bt(j_pr_body_pa, j_gt[..., BODY, :], slice(None))
-        err_lh_pa   = mpjpe_bt(j_pr_lh_pa, j_gt[..., LH, :], slice(None))
-        err_rh_pa   = mpjpe_bt(j_pr_rh_pa, j_gt[..., RH, :], slice(None))
-
-        pampjpe_all_t_sum  += err_all_pa.sum(dim=0)
-        pampjpe_body_t_sum += err_body_pa.sum(dim=0)
-        pampjpe_lh_t_sum   += err_lh_pa.sum(dim=0)
-        pampjpe_rh_t_sum   += err_rh_pa.sum(dim=0)
-
-        usageH, pplH = codebook_stats(idx["idxH"], args.K)
-        usageB, pplB = codebook_stats(idx["idxB"], args.K)
-        usageH_sum += usageH
-        usageB_sum += usageB
-        pplH_sum += pplH
-        pplB_sum += pplB
+        # --- codebook stats ---
+        uH, pH = codebook_stats(idx["idxH"], args.K)
+        uB, pB = codebook_stats(idx["idxB"], args.K)
+        cb_stats["usageH"] += uH; cb_stats["pplH"] += pH
+        cb_stats["usageB"] += uB; cb_stats["pplB"] += pB
 
         nb += 1
 
-    mpjpe_all_t  = mpjpe_all_t_sum  / frame_count.clamp_min(1)
-    mpjpe_body_t = mpjpe_body_t_sum / frame_count.clamp_min(1)
-    mpjpe_lh_t   = mpjpe_lh_t_sum   / frame_count.clamp_min(1)
-    mpjpe_rh_t   = mpjpe_rh_t_sum   / frame_count.clamp_min(1)
+    nb = max(nb, 1)
 
-    pampjpe_all_t = pampjpe_all_t_sum / frame_count.clamp_min(1)
-    pampjpe_body_t = pampjpe_body_t_sum / frame_count.clamp_min(1)
-    pampjpe_lh_t = pampjpe_lh_t_sum / frame_count.clamp_min(1)
-    pampjpe_rh_t = pampjpe_rh_t_sum / frame_count.clamp_min(1)
+    # --- build hierarchical metrics keys for wandb ---
+    metrics = {}
 
-    metrics = {
-        "feat_mse": feat_mse_sum / max(nb, 1),
-        "mpjpe_all_mm":  mpjpe_all_t.mean().item()  * 1000,
-        "mpjpe_body_mm": mpjpe_body_t.mean().item() * 1000,
-        "mpjpe_lh_mm":   mpjpe_lh_t.mean().item()   * 1000,
-        "mpjpe_rh_mm":   mpjpe_rh_t.mean().item()   * 1000,
-        "pampjpe_all_mm": pampjpe_all_t.mean().item() * 1000,
-        "pampjpe_body_mm": pampjpe_body_t.mean().item() * 1000,
-        "pampjpe_lh_mm": pampjpe_lh_t.mean().item() * 1000,
-        "pampjpe_rh_mm": pampjpe_rh_t.mean().item() * 1000,
-        "usageH": usageH_sum / max(nb, 1),
-        "pplH":   pplH_sum / max(nb, 1),
-        "usageB": usageB_sum / max(nb, 1),
-        "pplB":   pplB_sum / max(nb, 1),
-    }
+    # pose (mm)
+    for p in parts.keys():
+        metrics[f"EVAL/PA_MPJPE/{p}"]    = (sums[f"pampjpe_{p}"] / nb) * 1000.0
+        metrics[f"EVAL/WA_MPJPE/{p}"]  = (sums[f"wa_mpjpe_{p}"] / nb) * 1000.0
+        metrics[f"EVAL/W_MPJPE/{p}"]   = (sums[f"w_mpjpe_{p}"] / nb) * 1000.0
+
+    # recon / traj
+    metrics["EVAL/RECON/feat_mse"]       = sums["feat_mse"] / nb
+    metrics["EVAL/RTE/root"]             = sums["rte_root"] * 1000.0 / nb
+    metrics["EVAL/RTE/lh_wrist"]         = sums["rte_lh_wrist"] * 1000.0 / nb
+    metrics["EVAL/RTE/rh_wrist"]         = sums["rte_rh_wrist"] * 1000.0 / nb
+    metrics["EVAL/ACCEL/all"]            = sums["accel"] * 1000.0 / nb
+
+    # codebook
+    metrics["EVAL/CODEBOOK/H_usage"]     = cb_stats["usageH"] / nb
+    metrics["EVAL/CODEBOOK/H_ppl"]       = cb_stats["pplH"] / nb
+    metrics["EVAL/CODEBOOK/B_usage"]     = cb_stats["usageB"] / nb
+    metrics["EVAL/CODEBOOK/B_ppl"]       = cb_stats["pplB"] / nb
+
     return metrics
