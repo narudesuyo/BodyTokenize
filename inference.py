@@ -12,11 +12,11 @@ import glob
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", type=str, default="/large/naru/EgoHand/BodyTokenize/runs/cnn_large_token_8_1000/config.yaml")
-    ap.add_argument("--ckpt", type=str, default="/large/naru/EgoHand/BodyTokenize/runs/cnn_large_token_8_1000/ckpt_epoch980.pt")
+    ap.add_argument("--config", type=str, default="/large/naru/EgoHand/BodyTokenize/runs/token_40_0115_fingertips/config.yaml")
+    ap.add_argument("--ckpt", type=str, default="/large/naru/EgoHand/BodyTokenize/runs/token_40_0115_fingertips/ckpt_epoch700.pt")
     ap.add_argument("--name", type=str, default=None)
-    ap.add_argument("--video_base_dir", type=str, default="/large/naru/EgoHand/data/takes_clipped/videos")
-    ap.add_argument("--data_save_dir", type=str, default="/large/naru/EgoHand/data/takes_clipped")
+    ap.add_argument("--video_base_dir", type=str, default="/large/naru/EgoHand/data/takes_clipped/egoexo/videos")
+    ap.add_argument("--data_save_dir", type=str, default="/large/naru/EgoHand/data/takes_clipped/egoexo")
     args_cli = ap.parse_args()
 
     args = OmegaConf.load(args_cli.config)
@@ -33,7 +33,9 @@ def main():
         start = video_path.split("/")[-1].split(".")[0].split("___")[0]
         end = video_path.split("/")[-1].split(".")[0].split("___")[1]
         key = video_path.split("/")[-2] + "___" + start + "___" + end
-        save_path = os.path.join(args_cli.data_save_dir, "pose_tokens", "20", f"{sample_name}", f"{start}___{end}.npz")
+        # save_path = os.path.join(args_cli.data_save_dir, "pose_tokens", "20", f"{sample_name}", f"{start}___{end}.npz")
+        save_dir = os.path.join(args_cli.data_save_dir, "pose_tokens", "20", f"{sample_name}")
+        os.makedirs(save_dir, exist_ok=True)
 
 
         model.eval() 
@@ -55,18 +57,23 @@ def main():
         )
 
 
-        idx_all = []
+        # idx_all = []
+        i = 0
         for batch in dl:
             recon, losses, idx = model(batch["mB"].to(device), batch["mH"].to(device))
             idxH = idx["idxH"].detach().cpu().numpy()
             idxB = idx["idxB"].detach().cpu().numpy()
             idx = np.concatenate([idxH, idxB], axis=-1)
             idx = idx.reshape(-1)
-            idx_all.append(idx)
-        idx_all = np.array(idx_all)
-        print(f"shape: {idx_all.shape}")
-        os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        np.savez(save_path, idx_all)
+            save_path = os.path.join(save_dir, f"{start}___{end}_{i}.npy")
+            np.save(save_path, idx)
+            i += 1
+
+            # idx_all.append(idx)
+        # idx_all = np.array(idx_all)
+        # print(f"shape: {idx_all.shape}")
+        # os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        # np.savez(save_path, idx_all)
 
 
 if __name__ == "__main__":

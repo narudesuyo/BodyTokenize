@@ -3,9 +3,9 @@ data_base_dir: /large/naru/EgoHand/data
 data_dir: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_tips.pt
 data_dir_eval: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_val_joints_tips.pt
 pattern: "*.npy"
-save_dir: ./runs/token_40_0115_fingertips
+save_dir: ./runs/token_40_0115_fingertips_
 project: h2vq_vqvae
-name: token_40_0115_fingertips
+name: token_40_0115_fingertips_
 
 # system
 seed: 0
@@ -62,13 +62,13 @@ eval_every: 1
 eval_num_save_samples: 10
 eval_batch_size: 32
 eval_vis_dir: ./${save_dir}/eval
-eval_save_vis_every: 1
-eval_check: true
+eval_save_vis_every: 50
+eval_check: false
 
 # normalize
 normalize: true
-mean_path: ./preprocess/statistics/motion623_fingertips_mean.npy
-std_path: ./preprocess/statistics/motion623_fingertips_std.npy
+mean_path: ./preprocess/statistics/tips/mean.npy
+std_path: ./preprocess/statistics/tips/std.npy
 
 include_fingertips: true
 body_in_dim: 263

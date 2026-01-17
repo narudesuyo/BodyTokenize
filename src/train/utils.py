@@ -1,5 +1,6 @@
 import torch
 from src.model.vqvae import H2VQ
+import os
 def build_model_from_args(args, device):
     model = H2VQ(
         T=args.T, 
@@ -35,3 +36,47 @@ def build_model_from_args(args, device):
         include_fingertips=args.include_fingertips,
     ).to(device)
     return model
+
+def _maybe_load_ckpt(path: str):
+    if path is None:
+        return None
+    if not os.path.exists(path):
+        return None
+    return torch.load(path, map_location="cpu", weights_only=False)
+
+
+def _safe_merge_args_from_ckpt(args, ckpt):
+    if ckpt is None:
+        return args
+
+    ckpt_args = ckpt.get("args", None)
+    if not isinstance(ckpt_args, dict):
+        try:
+            ckpt_args = vars(ckpt_args)
+        except Exception:
+            ckpt_args = None
+
+    if not isinstance(ckpt_args, dict):
+        return args
+
+    keys_to_sync = [
+        "K", "T", "include_fingertips",
+        "model_type", "n_layers", "n_heads", "d_model", "d_ff",
+        "mean_path", "std_path", "normalize",
+        "joints_loss", "joints_loss_weight",
+        "lr", "wd",
+        "eval_every", "eval_num_save_samples", "eval_vis_dir", "eval_save_vis_every",
+        "log_every", "ckpt_every",
+        "project", "name",
+        "epochs", "batch_size", "num_workers",
+        "data_dir", "data_dir_eval",
+    ]
+
+    for k in keys_to_sync:
+        if k in ckpt_args:
+            try:
+                args[k] = ckpt_args[k]
+            except Exception:
+                pass
+
+    return args

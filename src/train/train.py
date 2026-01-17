@@ -28,6 +28,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=str, default="config/motion_vqvae.yaml")
     ap.add_argument("--name", type=str, default=None)
+    ap.add_argument("--resume", type=str, default=None)
     args_cli = ap.parse_args()
 
     args = OmegaConf.load(args_cli.config)
@@ -82,17 +83,24 @@ def main():
         drop_last=True,
         collate_fn=collate_stack,
     )
+
+
     # ===== Model =====
-    model = build_model_from_args(args, device)
+    if args_cli.resume is not None:
+        ckpt = torch.load(args_cli.resume, weights_only=False)
+        model = build_model_from_args(args, device)
+        model.load_state_dict(ckpt["model"])
+        opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
+        opt.load_state_dict(ckpt["opt"])
+    else:
+        model = build_model_from_args(args, device) 
+        opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
     n_all, n_train = count_params(model)
     print("========== MODEL ==========")
     print(model)  # architecture (full)
     print("========== PARAMS =========")
     print(f"Total params     : {n_all:,}")
-    print(f"Trainable params : {n_train:,}")
     print("===========================")
-
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
 
     # ===== wandb =====
     wandb.init(project=args.project, name=args.name, config=OmegaConf.to_container(args, resolve=True))
