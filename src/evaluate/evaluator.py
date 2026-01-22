@@ -83,8 +83,8 @@ def evaluate_model(
 
         joints_num = 52 if not args.include_fingertips else 62
 
-        j_gt = recover_from_ric(gt_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True))
-        j_pr = recover_from_ric(pr_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True))
+        j_gt = recover_from_ric(gt_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True), base_idx=args.base_idx)
+        j_pr = recover_from_ric(pr_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True), base_idx=args.base_idx)
 
         # --- visualize ---
         if vis and it < num_save_samples:
@@ -95,8 +95,11 @@ def evaluate_model(
                     save_path=f"{viz_dir}/{it:03d}/{vname}.mp4",
                     fps=fps,
                     view=vname,
+                    rotate=False,
                     include_fingertips=args.include_fingertips,
-                    only_gt=args.eval_check,
+                    only_gt=True if args.eval_check and not args.resume else False,
+                    origin_align=True,
+                    base_idx=args.base_idx,
                 )
 
         # --- pose metrics (PA / WA / W-firstK) ---

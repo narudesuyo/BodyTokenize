@@ -23,12 +23,12 @@ def zup_to_yup(kp):
     return kp_yup
 
 def process_file(positions: np.ndarray, feet_thre: float, tgt_offsets: torch.Tensor, n_raw_offsets, kinematic_chain,
-                 fid_l=(7,10), fid_r=(8,11), face_joint_indx=(2,1,17,16), l_idx1=5, l_idx2=8):
+                 fid_l=(7,10), fid_r=(8,11), face_joint_indx=(2,1,17,16), l_idx1=5, l_idx2=8, base_idx: int = 0):
     """
     positions: (T,52,3) numpy, already Y-up
     return: data (T-1,623) numpy
     """
-    # ---- uniform skeleton (same as your code) ----
+    # ---- uniform skeleton ----
     src_skel = Skeleton(n_raw_offsets, kinematic_chain, 'cpu')
     src_offset = src_skel.get_offsets_joints(torch.from_numpy(positions[0])).numpy()
     tgt_offset = tgt_offsets.numpy()
@@ -50,7 +50,7 @@ def process_file(positions: np.ndarray, feet_thre: float, tgt_offsets: torch.Ten
 
     # ---- center XZ by first frame root ----
     root_pos_init = positions[0]
-    root_pose_init_xz = root_pos_init[0] * np.array([1, 0, 1])
+    root_pose_init_xz = root_pos_init[base_idx] * np.array([1, 0, 1]) # maybe base_idx
     positions = positions - root_pose_init_xz
 
     # ---- face Z+ by first frame ----
@@ -83,35 +83,60 @@ def process_file(positions: np.ndarray, feet_thre: float, tgt_offsets: torch.Ten
 
     feet_l, feet_r = foot_detect(positions, feet_thre)
 
+
+    global_positions = positions.copy()
+
+
     # ---- IK -> cont6d ----
     skel = Skeleton(n_raw_offsets, kinematic_chain, "cpu")
     quat_params = skel.inverse_kinematics_np(positions, face_joint_indx, smooth_forward=True)
     quat_params = qfix(quat_params)
 
-    r_rot = quat_params[:, 0].copy()                     # (T,4)
-    cont_6d_params = quaternion_to_cont6d_np(quat_params) # (T,52,6)
+    cont_6d_params = quaternion_to_cont6d_np(quat_params)  # jrはlocalでOK
 
-    velocity = (positions[1:, 0] - positions[:-1, 0]).copy()
-    velocity = qrot_np(r_rot[1:], velocity)
+    # base joint の global 回転 r_rot を作る
+    # if base_idx == 0:
+    #     r_rot = quat_params[:, 0].copy()
+    # else:
+    #     glob_quat = np.zeros_like(quat_params)
+    #     glob_quat[:, 0] = quat_params[:, 0]
+    #     for chain in skel._kinematic_tree:
+    #         for k in range(1, len(chain)):
+    #             p = chain[k - 1]
+    #             c = chain[k]
+    #             glob_quat[:, c] = qmul_np(glob_quat[:, p], quat_params[:, c])
+    #     r_rot = glob_quat[:, base_idx].copy()
+    rot_ref_idx = 0
+    trans_ref_idx = base_idx
 
+    r_rot = quat_params[:, rot_ref_idx].copy()
+
+    r_rot_inv = qinv_np(r_rot)
+
+    # ---- base linear velocity (world -> base) ----
+    velocity = (positions[1:, trans_ref_idx] - positions[:-1, trans_ref_idx]).copy()   # (T-1,3)
+    velocity = qrot_np(r_rot_inv[1:], velocity)
+
+    # ---- base angular velocity ----
     r_velocity = qmul_np(r_rot[1:], qinv_np(r_rot[:-1]))  # (T-1,4)
 
     # ---- local pose ----
     positions_local = positions.copy()
-    positions_local[..., 0] -= positions_local[:, 0:1, 0]
-    positions_local[..., 2] -= positions_local[:, 0:1, 2]
-    positions_local = qrot_np(np.repeat(r_rot[:, None], positions_local.shape[1], axis=1), positions_local)
+    positions_local[..., 0] -= positions_local[:, trans_ref_idx:trans_ref_idx+1, 0]
+    positions_local[..., 2] -= positions_local[:, trans_ref_idx:trans_ref_idx+1, 2]
+    positions_local = qrot_np(np.repeat(r_rot_inv[:, None], positions_local.shape[1], axis=1), positions_local)
 
-    root_y = positions_local[:, 0, 1:2]                 # (T,1)
+    root_y = positions_local[:, trans_ref_idx, 1:2]                 # (T,1)
     r_velocity_y = np.arcsin(r_velocity[:, 2:3])        # (T-1,1)
     l_velocity = velocity[:, [0, 2]]                    # (T-1,2)
 
     root_data = np.concatenate([r_velocity_y, l_velocity, root_y[:-1]], axis=-1)  # (T-1,4)
+    J = cont_6d_params.shape[1]  # 52 or 62
+    keep_idxs = [j for j in range(J) if j != trans_ref_idx]
+    rot_data = cont_6d_params[:, keep_idxs].reshape(len(cont_6d_params), -1)      # (T, (J-1)*6)
+    ric_data = positions_local[:, keep_idxs].reshape(len(positions_local), -1)     # (T, (J-1)*3)
 
-    rot_data = cont_6d_params[:, 1:].reshape(len(cont_6d_params), -1)             # (T,(51)*6)
-    ric_data = positions_local[:, 1:].reshape(len(positions_local), -1)           # (T,(51)*3)
-
-    local_vel = qrot_np(np.repeat(r_rot[:-1, None], global_positions.shape[1], axis=1),
+    local_vel = qrot_np(np.repeat(r_rot_inv[:-1, None], global_positions.shape[1], axis=1),
                         global_positions[1:] - global_positions[:-1]).reshape(len(global_positions)-1, -1)  # (T-1, 52*3)
 
     data = root_data
@@ -124,10 +149,10 @@ def process_file(positions: np.ndarray, feet_thre: float, tgt_offsets: torch.Ten
     return data.astype(np.float32)
 
 
-def kp3d_to_motion_rep(kp3d_52_yup: np.ndarray, feet_thre: float, tgt_offsets: torch.Tensor, n_raw_offsets, kinematic_chain):
+def kp3d_to_motion_rep(kp3d_52_yup: np.ndarray, feet_thre: float, tgt_offsets: torch.Tensor, n_raw_offsets, kinematic_chain, base_idx=0):
     """
     kp3d_52_yup: (T,52,3) numpy, Y-up
     returns: (T-1,motion_rep_dim) numpy
     """
     kp3d_52_yup = zup_to_yup(kp3d_52_yup)
-    return process_file(kp3d_52_yup, feet_thre, tgt_offsets, n_raw_offsets, kinematic_chain)
+    return process_file(kp3d_52_yup, feet_thre, tgt_offsets, n_raw_offsets, kinematic_chain, base_idx=base_idx)

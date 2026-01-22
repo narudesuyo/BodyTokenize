@@ -22,6 +22,8 @@ def visualize_two_motions(
     text_offset=(0.0, 0.0, 0.0),
     include_fingertips=False,
     only_gt=False,
+    origin_align=True,
+    base_idx=0,
 ):
     """
     j_gt, j_pr: (T, J, 3) world coords (x,y,z), y-up.
@@ -50,10 +52,15 @@ def visualize_two_motions(
     if not only_gt:
         assert j_pr.ndim == 3 and j_pr.shape[:2] == (T, J)
 
-    # ---------- origin align ----------
-    j_gt = j_gt - j_gt[0:1, 0:1, :]
-    if not only_gt:
-        j_pr = j_pr - j_pr[0:1, 0:1, :]
+    # ---------- origin alignment ----------
+    if origin_align:
+        j_gt = j_gt.copy()
+        j_gt[..., 0] -= j_gt[0, base_idx, 0]
+        j_gt[..., 2] -= j_gt[0, base_idx, 2]
+        if not only_gt:
+            j_pr = j_pr.copy()
+            j_pr[..., 0] -= j_pr[0, base_idx, 0]
+            j_pr[..., 2] -= j_pr[0, base_idx, 2]
 
     # ---------- default EDGES ----------
     if edges is None:

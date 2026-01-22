@@ -131,7 +131,7 @@ def recover_root_rot_pos(data_t: torch.Tensor):
     return r_rot_quat, r_pos
 
 
-def recover_from_ric(data_t: torch.Tensor, joints_num: int, use_root_loss: bool = True):
+def recover_from_ric(data_t: torch.Tensor, joints_num: int, use_root_loss: bool = True, base_idx: int = 0):
     r_rot_quat, r_pos = recover_root_rot_pos(data_t)
     if not use_root_loss:
         # translation off
@@ -148,7 +148,7 @@ def recover_from_ric(data_t: torch.Tensor, joints_num: int, use_root_loss: bool 
     )
     positions[..., 0] += r_pos[..., 0:1]
     positions[..., 2] += r_pos[..., 2:3]
-    positions = torch.cat([r_pos.unsqueeze(-2), positions], dim=-2)
+    positions = torch.cat([positions[:,:, :base_idx], r_pos.unsqueeze(-2), positions[:,:, base_idx:]], dim=-2)
     return positions
 
 

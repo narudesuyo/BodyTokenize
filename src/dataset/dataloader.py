@@ -26,7 +26,9 @@ class MotionDataset(Dataset):
         pad_if_short: bool = True,  # ★追加（短いclipをどうするか）
         include_fingertips: bool = False,
         tgt_offsets_path: str = "tgt_offsets.npy",
+        base_idx: int = 0,
     ):
+        self.base_idx = base_idx
         super().__init__()
         self.pt_path = pt_path
         self.to_torch = to_torch
@@ -180,6 +182,7 @@ class MotionDataset(Dataset):
                     tgt_offsets=self.tgt_offsets,
                     n_raw_offsets=self.n_raw_offsets,
                     kinematic_chain=self.kinematic_chain,
+                    base_idx=self.base_idx,
                 )
 
                 # ---------- NaN check (arr) ----------

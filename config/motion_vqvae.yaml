@@ -3,9 +3,23 @@ data_base_dir: /large/naru/EgoHand/data
 data_dir: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_tips.pt
 data_dir_eval: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_val_joints_tips.pt
 pattern: "*.npy"
-save_dir: ./runs/token_40_0115_fingertips_
-project: h2vq_vqvae
-name: token_40_0115_fingertips_
+
+# frequently changed
+use_root_loss: false
+base_idx: 15
+code_dim: 256
+K: 1024
+T: 21
+body_tokens_per_t: 4
+
+
+# eval
+eval_every: 1
+eval_num_save_samples: 5
+eval_batch_size: 32
+eval_vis_dir: ${save_dir}/eval
+eval_save_vis_every: 100
+eval_check: false
 
 # system
 seed: 0
@@ -13,9 +27,8 @@ device: cuda
 num_workers: 18
 
 # training
-T: 81
-batch_size: 32
-epochs: 1000
+batch_size: 256
+epochs: 2000
 lr: 0.00001
 wd: 0.000001
 grad_clip: 1
@@ -26,12 +39,10 @@ joints_loss_weight: 5.0
 
 # model
 
-code_dim: 256
-K: 1024
+
 ema_decay: 0.99
 alpha_commit: 2
-body_tokens_per_t: 40
-hand_tokens_per_t: 40
+hand_tokens_per_t: ${body_tokens_per_t}
 body_down: 1
 hand_down: 1
 enc_depth: 6
@@ -40,7 +51,6 @@ mlp_ratio: 4.0
 alpha_root: 5.0
 alpha_body: 1.0
 alpha_hand: 1.0
-use_root_loss: false
 enc_type_B: "cnn"
 enc_type_H: "cnn"
 enc_use_attn_B: False 
@@ -57,19 +67,17 @@ cnn_dilation_max: 8
 cnn_drop: 0.0
 dec_hid: 256
 
-# eval
-eval_every: 1
-eval_num_save_samples: 10
-eval_batch_size: 32
-eval_vis_dir: ./${save_dir}/eval
-eval_save_vis_every: 50
-eval_check: false
+
 
 # normalize
 normalize: true
 mean_path: ./preprocess/statistics/tips/mean.npy
 std_path: ./preprocess/statistics/tips/std.npy
 
+
 include_fingertips: true
-body_in_dim: 263
-hand_in_dim: 480
+
+
+name: base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}
+save_dir: ./runs/${name}
+project: h2vq_vqvae

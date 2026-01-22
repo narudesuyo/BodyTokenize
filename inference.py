@@ -15,8 +15,10 @@ def main():
     ap.add_argument("--config", type=str, default="/large/naru/EgoHand/BodyTokenize/runs/token_40_0115_fingertips/config.yaml")
     ap.add_argument("--ckpt", type=str, default="/large/naru/EgoHand/BodyTokenize/runs/token_40_0115_fingertips/ckpt_epoch700.pt")
     ap.add_argument("--name", type=str, default=None)
-    ap.add_argument("--video_base_dir", type=str, default="/large/naru/EgoHand/data/takes_clipped/egoexo/videos")
-    ap.add_argument("--data_save_dir", type=str, default="/large/naru/EgoHand/data/takes_clipped/egoexo")
+    video_base_dir = os.path.join(os.getenv("DATA_ROOT"), "takes_clipped", "egoexo", "videos")
+    data_save_dir = os.path.join(os.getenv("DATA_ROOT"), "takes_clipped", "egoexo")
+    human_pose_dir = os.path.join(os.getenv("DATA_ROOT"), "ee4d", "ee4d_motion_uniegomotion", "uniegomotion", "ee_train_joints_tips.pt")
+
     args_cli = ap.parse_args()
 
     args = OmegaConf.load(args_cli.config)
@@ -25,7 +27,7 @@ def main():
     ckpt = torch.load(args_cli.ckpt, map_location="cpu", weights_only=False)
     model.load_state_dict(ckpt["model"])
 
-    video_paths = glob.glob(os.path.join(args_cli.video_base_dir, "**/*.mp4"), recursive=True)
+    video_paths = glob.glob(os.path.join(video_base_dir, "**/*.mp4"), recursive=True)
     video_paths.sort()
 
     for video_path in tqdm(video_paths, desc="Processing videos"):
@@ -34,16 +36,18 @@ def main():
         end = video_path.split("/")[-1].split(".")[0].split("___")[1]
         key = video_path.split("/")[-2] + "___" + start + "___" + end
         # save_path = os.path.join(args_cli.data_save_dir, "pose_tokens", "20", f"{sample_name}", f"{start}___{end}.npz")
-        save_dir = os.path.join(args_cli.data_save_dir, "pose_tokens", "20", f"{sample_name}")
+        save_dir = os.path.join(data_save_dir, "tok_pose", "20", f"{sample_name}")
         os.makedirs(save_dir, exist_ok=True)
 
 
         model.eval() 
         ds_inf = MotionInferenceDataset(
-            pt_path=args.data_dir,
+            pt_path=human_pose_dir,
             key=key,  # ←指定したいkey
             clip_len=21,
-            overlap=2,
+            overlap=1,
+            include_fingertips=args.include_fingertips,
+
         )
         dl = DataLoader(
             ds_inf,
@@ -55,26 +59,17 @@ def main():
             drop_last=True,
             collate_fn=collate_stack,   # ★ここ変更
         )
-
-
-        # idx_all = []
         i = 0
         for batch in dl:
             recon, losses, idx = model(batch["mB"].to(device), batch["mH"].to(device))
             idxH = idx["idxH"].detach().cpu().numpy()
             idxB = idx["idxB"].detach().cpu().numpy()
             idx = np.concatenate([idxH, idxB], axis=-1)
+            print(f"idx shape: {idx.shape} idxB shape: {idxB.shape} idxH shape: {idxH.shape}")
             idx = idx.reshape(-1)
-            save_path = os.path.join(save_dir, f"{start}___{end}_{i}.npy")
-            np.save(save_path, idx)
+            save_path = os.path.join(save_dir, f"{start}___{end}_{i}.npz")
+            np.savez_compressed(save_path, idx=idx)
             i += 1
-
-            # idx_all.append(idx)
-        # idx_all = np.array(idx_all)
-        # print(f"shape: {idx_all.shape}")
-        # os.makedirs(os.path.dirname(save_path), exist_ok=True)
-        # np.savez(save_path, idx_all)
-
 
 if __name__ == "__main__":
     main()

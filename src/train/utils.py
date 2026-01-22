@@ -2,10 +2,16 @@ import torch
 from src.model.vqvae import H2VQ
 import os
 def build_model_from_args(args, device):
+    if args.include_fingertips:
+        body_in_dim = 263
+        hand_in_dim = 480
+    else:
+        body_in_dim = 263
+        hand_in_dim = 360
     model = H2VQ(
         T=args.T, 
-        body_in_dim=args.body_in_dim,
-        hand_in_dim=args.hand_in_dim,
+        body_in_dim=body_in_dim,
+        hand_in_dim=hand_in_dim,
         code_dim=args.code_dim,
         K=args.K,
         ema_decay=args.ema_decay,

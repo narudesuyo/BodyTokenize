@@ -32,6 +32,7 @@ def main():
     args_cli = ap.parse_args()
 
     args = OmegaConf.load(args_cli.config)
+    args.resume = args_cli.resume
     set_seed(args.seed)
 
     os.makedirs(args.save_dir, exist_ok=True)
@@ -43,6 +44,7 @@ def main():
 
     # ===== Dataset / Loader =====
     # args.data_dir が「ptパス」になってる前提（必要ならyaml側で名前変えて）
+
     ds = MotionDataset(
         pt_path=args.data_dir,            # ★ここがpt
         feet_thre=getattr(args, "feet_thre", 0.002),
@@ -52,6 +54,7 @@ def main():
         pad_if_short=getattr(args, "pad_if_short", True),
         include_fingertips=getattr(args, "include_fingertips", False),
         to_torch=True,
+        base_idx=args.base_idx,
     )
 
     dl = DataLoader(
@@ -73,6 +76,7 @@ def main():
         pad_if_short=getattr(args, "pad_if_short", True),
         include_fingertips=getattr(args, "include_fingertips", False),
         to_torch=True,
+        base_idx=args.base_idx,
     )
     dl_eval = DataLoader(
         ds_eval,
@@ -86,12 +90,17 @@ def main():
 
 
     # ===== Model =====
+    start_epoch = 1
+    global_step = 0
     if args_cli.resume is not None:
         ckpt = torch.load(args_cli.resume, weights_only=False)
         model = build_model_from_args(args, device)
         model.load_state_dict(ckpt["model"])
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
         opt.load_state_dict(ckpt["opt"])
+
+        start_epoch = ckpt["epoch"] + 1
+        global_step = ckpt["step"]
     else:
         model = build_model_from_args(args, device) 
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
@@ -112,8 +121,7 @@ def main():
     mean[0:1] = 0
     std[0:1] = 1
 
-    global_step = 0
-    for epoch in tqdm(range(1, args.epochs + 1), desc="Epochs"):
+    for epoch in tqdm(range(start_epoch, args.epochs + 1), desc="Epochs"):
         model.train()
         t0 = time.time()
 
@@ -148,8 +156,8 @@ def main():
             gt_denorm = target * std + mean
             gt_623 = reconstruct_623_from_body_hand(mB, mH)
             pred_623 = reconstruct_623_from_body_hand(recon_denorm[:, :, :263], recon_denorm[:, :, 263:])
-            gt_joints = recover_from_ric(gt_623, joints_num=52)
-            pred_joints = recover_from_ric(pred_623, joints_num=52)
+            gt_joints = recover_from_ric(gt_623, joints_num=52, base_idx=args.base_idx)
+            pred_joints = recover_from_ric(pred_623, joints_num=52, base_idx=args.base_idx)
             gt_joints = gt_joints - gt_joints[..., :1, :]
             pred_joints = pred_joints - pred_joints[..., :1, :]
 
@@ -160,17 +168,17 @@ def main():
 
             sample = recon[0]
 
-            if it == 0:
-                for i in range(sample.shape[0]):
-                    p = sample[i, :4]
-                    g = mB[0, i, :4]
+            # if it == 0:
+            #     for i in range(sample.shape[0]):
+            #         p = sample[i, :4]
+            #         g = mB[0, i, :4]
 
-                    print(f"  yaw   : pred={p[0]: .5f} | gt={g[0]: .5f}")
-                    print(f"  vel_x : pred={p[1]: .5f} | gt={g[1]: .5f}")
-                    print(f"  vel_z : pred={p[2]: .5f} | gt={g[2]: .5f}")
-                    print(f"  root_y: pred={p[3]: .5f} | gt={g[3]: .5f}")
-                    print("-" * 40)
-                    break
+            #         print(f"  yaw   : pred={p[0]: .5f} | gt={g[0]: .5f}")
+            #         print(f"  vel_x : pred={p[1]: .5f} | gt={g[1]: .5f}")
+            #         print(f"  vel_z : pred={p[2]: .5f} | gt={g[2]: .5f}")
+            #         print(f"  root_y: pred={p[3]: .5f} | gt={g[3]: .5f}")
+            #         print("-" * 40)
+            #         break
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
