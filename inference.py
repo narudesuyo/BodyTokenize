@@ -44,7 +44,7 @@ def main():
         ds_inf = MotionInferenceDataset(
             pt_path=human_pose_dir,
             key=key,  # ←指定したいkey
-            clip_len=21,
+            clip_len=20,
             overlap=1,
             include_fingertips=args.include_fingertips,
 

@@ -10,8 +10,9 @@ from src.evaluate.metric import (
     mpjpe_bt,
     wa_mpjpe,
     w_mpjpe_firstk,
-    rte_joint,
     accel_all_joints,
+    relative_translation_error,
+    root_translation_error,
 )
 from tqdm import tqdm
 
@@ -42,9 +43,12 @@ def evaluate_model(
     sums = {f"{m}_{p}": 0.0 for m in ["pampjpe", "wa_mpjpe", "w_mpjpe"] for p in parts.keys()}
     sums.update({
         "feat_mse": 0.0,
-        "rte_root": 0.0,
-        "rte_lh_wrist": 0.0,
-        "rte_rh_wrist": 0.0,
+        "relative_translation_error_pelvis": 0.0,
+        "relative_translation_error_lh_wrist": 0.0,
+        "relative_translation_error_rh_wrist": 0.0,
+        "root_translation_error_pelvis": 0.0,
+        "root_translation_error_lh_wrist": 0.0,
+        "root_translation_error_rh_wrist": 0.0,
         "accel": 0.0,
     })
     cb_stats = {"usageH": 0.0, "pplH": 0.0, "usageB": 0.0, "pplB": 0.0}
@@ -121,9 +125,13 @@ def evaluate_model(
             ).mean().item()
 
         # --- trajectory metrics ---
-        sums["rte_root"]      += rte_joint(j_pr, j_gt, ROOT_IDX).mean().item()
-        sums["rte_lh_wrist"]  += rte_joint(j_pr, j_gt, LH_WRIST_IDX).mean().item()
-        sums["rte_rh_wrist"]  += rte_joint(j_pr, j_gt, RH_WRIST_IDX).mean().item()
+        sums["relative_translation_error_pelvis"]      += relative_translation_error(j_pr, j_gt, ROOT_IDX, use_scale=False).mean().item()
+        sums["relative_translation_error_lh_wrist"]  += relative_translation_error(j_pr, j_gt, LH_WRIST_IDX, use_scale=False).mean().item()
+        sums["relative_translation_error_rh_wrist"]  += relative_translation_error(j_pr, j_gt, RH_WRIST_IDX, use_scale=False).mean().item()
+        sums["root_translation_error_pelvis"]                += root_translation_error(j_pr, j_gt, ROOT_IDX, use_scale=False).mean().item()
+        sums["root_translation_error_lh_wrist"]                += root_translation_error(j_pr, j_gt, LH_WRIST_IDX, use_scale=False).mean().item()
+        sums["root_translation_error_rh_wrist"]                += root_translation_error(j_pr, j_gt, RH_WRIST_IDX, use_scale=False).mean().item()
+
         sums["accel"]         += accel_all_joints(j_pr, j_gt, fps=fps).mean().item()
 
         # --- codebook stats ---
@@ -147,9 +155,13 @@ def evaluate_model(
 
     # recon / traj
     metrics["EVAL/RECON/feat_mse"]       = sums["feat_mse"] / nb
-    metrics["EVAL/RTE/root"]             = sums["rte_root"] * 1000.0 / nb
-    metrics["EVAL/RTE/lh_wrist"]         = sums["rte_lh_wrist"] * 1000.0 / nb
-    metrics["EVAL/RTE/rh_wrist"]         = sums["rte_rh_wrist"] * 1000.0 / nb
+    metrics["EVAL/RelativeTranslationError/pelvis"]             = sums["relative_translation_error_pelvis"] * 1000.0 / nb
+    metrics["EVAL/RelativeTranslationError/lh_wrist"]         = sums["relative_translation_error_lh_wrist"] * 1000.0 / nb
+    metrics["EVAL/RelativeTranslationError/rh_wrist"]         = sums["relative_translation_error_rh_wrist"] * 1000.0 / nb
+    metrics["EVAL/RootTranslationError/pelvis"]             = sums["root_translation_error_pelvis"] * 1000.0 / nb
+    metrics["EVAL/RootTranslationError/lh_wrist"]             = sums["root_translation_error_lh_wrist"] * 1000.0 / nb
+    metrics["EVAL/RootTranslationError/rh_wrist"]             = sums["root_translation_error_rh_wrist"] * 1000.0 / nb
+
     metrics["EVAL/ACCEL/all"]            = sums["accel"] * 1000.0 / nb
 
     # codebook

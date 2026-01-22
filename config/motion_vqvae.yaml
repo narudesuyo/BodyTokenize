@@ -10,7 +10,7 @@ base_idx: 15
 code_dim: 256
 K: 1024
 T: 21
-body_tokens_per_t: 4
+body_tokens_per_t: 40
 
 
 # eval
@@ -27,7 +27,7 @@ device: cuda
 num_workers: 18
 
 # training
-batch_size: 256
+batch_size: 8
 epochs: 2000
 lr: 0.00001
 wd: 0.000001
