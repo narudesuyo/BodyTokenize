@@ -16,6 +16,7 @@ def main():
     ap.add_argument("--ckpt", type=str, default="/large/naru/EgoHand/BodyTokenize/runs/token_40_0115_fingertips/ckpt_epoch700.pt")
     ap.add_argument("--split", type=str, default="train")
     ap.add_argument("--name", type=str, default=None)
+    ap.add_argument("--overwrite", action="store_true")
     args_cli = ap.parse_args()
 
     video_base_dir = os.path.join(os.getenv("DATA_ROOT"), args_cli.split, "takes_clipped", "egoexo", "videos")
@@ -65,14 +66,17 @@ def main():
         )
         i = 0
         for batch in dl:
+            save_path = os.path.join(save_dir, f"{start}___{end}_{i}.npz")
+            if os.path.exists(save_path) and not args_cli.overwrite:
+                continue
             recon, losses, idx = model(batch["mB"].to(device), batch["mH"].to(device))
+
             idxH = idx["idxH"].detach().cpu().numpy()
             idxB = idx["idxB"].detach().cpu().numpy()
             idx = np.concatenate([idxH, idxB], axis=-1)
             if j == 0 and i == 0:
                 print(f"idx shape: {idx.shape} idxB shape: {idxB.shape} idxH shape: {idxH.shape}")
             idx = idx.reshape(-1)
-            save_path = os.path.join(save_dir, f"{start}___{end}_{i}.npz")
             np.savez_compressed(save_path, idx=idx)
             i += 1
         j += 1
