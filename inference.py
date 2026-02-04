@@ -14,12 +14,14 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", type=str, default="/large/naru/EgoHand/BodyTokenize/runs/token_40_0115_fingertips/config.yaml")
     ap.add_argument("--ckpt", type=str, default="/large/naru/EgoHand/BodyTokenize/runs/token_40_0115_fingertips/ckpt_epoch700.pt")
+    ap.add_argument("--split", type=str, default="train")
     ap.add_argument("--name", type=str, default=None)
-    video_base_dir = os.path.join(os.getenv("DATA_ROOT"), "takes_clipped", "egoexo", "videos")
-    data_save_dir = os.path.join(os.getenv("DATA_ROOT"), "takes_clipped", "egoexo")
+    args_cli = ap.parse_args()
+
+    video_base_dir = os.path.join(os.getenv("DATA_ROOT"), args_cli.split, "takes_clipped", "egoexo", "videos")
+    data_save_dir = os.path.join(os.getenv("DATA_ROOT"), args_cli.split, "takes_clipped", "egoexo")
     human_pose_dir = os.path.join(os.getenv("DATA_ROOT"), "ee4d", "ee4d_motion_uniegomotion", "uniegomotion", "ee_train_joints_tips.pt")
 
-    args_cli = ap.parse_args()
 
     args = OmegaConf.load(args_cli.config)
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
@@ -36,7 +38,7 @@ def main():
         end = video_path.split("/")[-1].split(".")[0].split("___")[1]
         key = video_path.split("/")[-2] + "___" + start + "___" + end
         # save_path = os.path.join(args_cli.data_save_dir, "pose_tokens", "20", f"{sample_name}", f"{start}___{end}.npz")
-        save_dir = os.path.join(data_save_dir, "tok_pose", "20", f"{sample_name}")
+        save_dir = os.path.join(data_save_dir, "tok_pose",  f"{sample_name}")
         os.makedirs(save_dir, exist_ok=True)
 
 
