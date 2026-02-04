@@ -31,6 +31,8 @@ def main():
 
     video_paths = glob.glob(os.path.join(video_base_dir, "**/*.mp4"), recursive=True)
     video_paths.sort()
+    
+    j = 0
 
     for video_path in tqdm(video_paths, desc="Processing videos"):
         sample_name = video_path.split("/")[-2]
@@ -67,11 +69,13 @@ def main():
             idxH = idx["idxH"].detach().cpu().numpy()
             idxB = idx["idxB"].detach().cpu().numpy()
             idx = np.concatenate([idxH, idxB], axis=-1)
-            print(f"idx shape: {idx.shape} idxB shape: {idxB.shape} idxH shape: {idxH.shape}")
+            if j == 0 and i == 0:
+                print(f"idx shape: {idx.shape} idxB shape: {idxB.shape} idxH shape: {idxH.shape}")
             idx = idx.reshape(-1)
             save_path = os.path.join(save_dir, f"{start}___{end}_{i}.npz")
             np.savez_compressed(save_path, idx=idx)
             i += 1
+        j += 1
 
 if __name__ == "__main__":
     main()
