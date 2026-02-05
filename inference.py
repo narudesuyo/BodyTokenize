@@ -32,6 +32,9 @@ def main():
 
     video_paths = glob.glob(os.path.join(video_base_dir, "**/*.mp4"), recursive=True)
     video_paths.sort()
+
+    skipped_missing_key = 0
+    skipped_other = 0
     
     j = 0
 
