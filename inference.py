@@ -46,14 +46,21 @@ def main():
 
 
         model.eval() 
-        ds_inf = MotionInferenceDataset(
-            pt_path=human_pose_dir,
-            key=key,  # ←指定したいkey
-            clip_len=20,
-            overlap=1,
-            include_fingertips=args.include_fingertips,
-
-        )
+        try:
+            ds_inf = MotionInferenceDataset(
+                pt_path=human_pose_dir,
+                key=key,
+                clip_len=int(args_cli.clip_len),
+                overlap=int(args_cli.overlap),
+                include_fingertips=include_fingertips,
+            )
+        except KeyError as e:
+            skipped_missing_key += 1
+            continue
+        except Exception as e:
+            skipped_other += 1
+            print(f"[skip] unexpected error for key={key} video={video_path}: {type(e).__name__}: {e}")
+            continue
         dl = DataLoader(
             ds_inf,
             batch_size=1,
