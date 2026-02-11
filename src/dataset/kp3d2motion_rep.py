@@ -146,6 +146,9 @@ def process_file(positions: np.ndarray, feet_thre: float, tgt_offsets: torch.Ten
     data = np.concatenate([data, feet_l, feet_r], axis=-1)
 
     # assert data.shape[1] == 623, data.shape
+    # r_velocity: (T-1,4) with [w,x,y,z]
+    d_half_from_quat = np.arctan2(r_velocity[:, 2], r_velocity[:, 0])  # (T-1,)
+    rot_vel = r_velocity_y[:, 0]                                       # (T-1,)
     return data.astype(np.float32)
 
 

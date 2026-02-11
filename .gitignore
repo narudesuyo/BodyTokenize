@@ -13,3 +13,5 @@ runs/
 backup/
 *.png
 *.jpg
+./ckpts/
+*.out

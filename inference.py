@@ -35,7 +35,7 @@ def main():
 
     skipped_missing_key = 0
     skipped_other = 0
-    
+
     j = 0
 
     for video_path in tqdm(video_paths, desc="Processing videos"):
@@ -44,7 +44,7 @@ def main():
         end = video_path.split("/")[-1].split(".")[0].split("___")[1]
         key = video_path.split("/")[-2] + "___" + start + "___" + end
         # save_path = os.path.join(args_cli.data_save_dir, "pose_tokens", "20", f"{sample_name}", f"{start}___{end}.npz")
-        save_dir = os.path.join(data_save_dir, "tok_pose",  f"{sample_name}")
+        save_dir = os.path.join(data_save_dir, "tok_pose", "all", f"{sample_name}")
         os.makedirs(save_dir, exist_ok=True)
 
 
@@ -53,9 +53,9 @@ def main():
             ds_inf = MotionInferenceDataset(
                 pt_path=human_pose_dir,
                 key=key,
-                clip_len=int(args_cli.clip_len),
-                overlap=int(args_cli.overlap),
-                include_fingertips=include_fingertips,
+                clip_len=20,
+                overlap=1,
+                include_fingertips=args.include_fingertips,
             )
         except KeyError as e:
             skipped_missing_key += 1
@@ -76,7 +76,7 @@ def main():
         )
         i = 0
         for batch in dl:
-            save_path = os.path.join(save_dir, f"{start}___{end}_{i}.npz")
+            save_path = os.path.join(save_dir, f"{start}___{end}_{i:04d}.npz")
             if os.path.exists(save_path) and not args_cli.overwrite:
                 continue
             recon, losses, idx = model(batch["mB"].to(device), batch["mH"].to(device))

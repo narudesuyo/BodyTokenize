@@ -28,12 +28,12 @@ num_workers: 18
 
 # training
 batch_size: 8
-epochs: 2000
+epochs: 3000
 lr: 0.00001
 wd: 0.000001
 grad_clip: 1
 log_every: 1
-ckpt_every: 100
+ckpt_every: 1000
 joints_loss: false
 joints_loss_weight: 5.0
 
@@ -78,6 +78,6 @@ std_path: ./preprocess/statistics/tips/std.npy
 include_fingertips: true
 
 
-name: base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}
+name: base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/final
 save_dir: ./runs/${name}
 project: h2vq_vqvae

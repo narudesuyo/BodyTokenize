@@ -4,12 +4,13 @@ from matplotlib import pyplot as plt
 data_dir = "/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_tips.pt"
 data = torch.load(data_dir, map_location="cpu", weights_only=False)
 data_keys = list(data.keys())
-data_item = data[data_keys[0]]
-mean = np.load("./preprocess/statistics/motion623_fingertips_mean.npy")
-std = np.load("./preprocess/statistics/motion623_fingertips_std.npy")
+data_item = data["fair_bike_02_10___0___1215"]
+# mean = np.load("./preprocess/statistics/motion623_fingertips_mean.npy")
+# std = np.load("./preprocess/statistics/motion623_fingertips_std.npy")
 kp3d = data_item["kp3d"]
 kp52_full = np.concatenate([kp3d[:, :22, :], kp3d[:, 25:55, :], kp3d[:, -10:, :]], axis=1)
-
+print(f"kp52_full shape: {kp52_full.shape}")
+exit()
 
 
 

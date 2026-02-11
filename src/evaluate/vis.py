@@ -10,7 +10,7 @@ def visualize_two_motions(
     j_pr,
     save_path,
     edges=None,
-    fps=20,
+    fps=10,
     rotate=True,
     title="GT vs Pred",
     linewidth=2.0,

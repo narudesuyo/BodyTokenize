@@ -139,8 +139,8 @@ def recover_from_ric(data_t: torch.Tensor, joints_num: int, use_root_loss: bool 
         r_pos[..., 0] = 0.0
         r_pos[..., 2] = 0.0
         # rotation off (identity quaternion, w=1)
-        r_rot_quat = torch.zeros_like(r_rot_quat)
-        r_rot_quat[..., 0] = 1.0
+        # r_rot_quat = torch.zeros_like(r_rot_quat)
+        # r_rot_quat[..., 0] = 1.0
     positions = data_t[..., 4:(joints_num - 1) * 3 + 4].view(data_t.shape[:-1] + (-1, 3))
     positions = qrot(
         qinv(r_rot_quat[..., None, :]).expand(positions.shape[:-1] + (4,)),

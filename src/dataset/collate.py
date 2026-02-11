@@ -10,6 +10,10 @@ def collate_stack(batch):
         out["keys"] = [b["key"] for b in batch]
     if "start" in batch[0]:
         out["start"] = torch.tensor([b["start"] for b in batch], dtype=torch.long)
+    if "end" in batch[0]:
+        out["end"] = torch.tensor([b["end"] for b in batch], dtype=torch.long)
     if "Tfull" in batch[0]:
         out["Tfull"] = torch.tensor([b["Tfull"] for b in batch], dtype=torch.long)
+    if "clip_index" in batch[0]:
+        out["clip_index"] = torch.tensor([b["clip_index"] for b in batch], dtype=torch.long)
     return out

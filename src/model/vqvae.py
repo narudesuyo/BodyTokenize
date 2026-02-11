@@ -516,7 +516,7 @@ class H2VQ(nn.Module):
         if self.use_root_loss:
             recon_loss_root = F.mse_loss(recon_root, target_root)
         else:
-            recon_loss_root = F.mse_loss(recon[:,:,3:4], target[:,:,3:4])
+            recon_loss_root = F.mse_loss(recon[:,:, [0, 3]], target[:,:, [0, 3]])
 
         recon_body = recon[:, :, 4:263-4]
         target_body = target[:, :, 4:263-4]
