@@ -158,9 +158,9 @@ def evaluate_model(
     metrics["EVAL/RelativeTranslationError/pelvis(%)"]             = sums["relative_translation_error_pelvis"] / nb
     metrics["EVAL/RelativeTranslationError/lh_wrist(%)"]         = sums["relative_translation_error_lh_wrist"] / nb
     metrics["EVAL/RelativeTranslationError/rh_wrist(%)"]         = sums["relative_translation_error_rh_wrist"] / nb
-    metrics["EVAL/RootTranslationError/pelvis(mm)"]             = sums["root_translation_error_pelvis"] * 1000.0 / nb
-    metrics["EVAL/RootTranslationError/lh_wrist(mm)"]             = sums["root_translation_error_lh_wrist"] * 1000.0 / nb
-    metrics["EVAL/RootTranslationError/rh_wrist(mm)"]             = sums["root_translation_error_rh_wrist"] * 1000.0 / nb
+    metrics["EVAL/RootTranslationError/pelvis(%)"]             = sums["root_translation_error_pelvis"] / nb
+    metrics["EVAL/RootTranslationError/lh_wrist(%)"]             = sums["root_translation_error_lh_wrist"] / nb
+    metrics["EVAL/RootTranslationError/rh_wrist(%)"]             = sums["root_translation_error_rh_wrist"] / nb
 
     metrics["EVAL/ACCEL/all(mm/s^2)"]            = sums["accel"] * 1000.0 / nb
 

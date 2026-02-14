@@ -25,9 +25,9 @@ B_FEET0, B_FEET1 = 259, 263   # 4
 
 # hand (360)  ※ recon/target上では bodyの後ろに来るので +263 して使う
 H0 = 263
-H_RIC0, H_RIC1 = H0 + 0,   H0 + 90
-H_ROT0, H_ROT1 = H0 + 90,  H0 + 270
-H_VEL0, H_VEL1 = H0 + 270, H0 + 360
+H_RIC0, H_RIC1 = H0 + 0,   H0 + 120
+H_ROT0, H_ROT1 = H0 + 120, H0 + 360
+H_VEL0, H_VEL1 = H0 + 360, H0 + 480
 
 def mse(x, y):
     return torch.mean((x - y) ** 2)

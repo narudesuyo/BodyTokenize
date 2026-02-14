@@ -29,6 +29,7 @@ class MotionAllInferenceDataset(Dataset):
         kp_field: str = "kp3d",
         assume_y_up: bool = True,
         include_fingertips: bool = False,
+        base_idx: int = 0,
     ):
         super().__init__()
         
@@ -43,7 +44,7 @@ class MotionAllInferenceDataset(Dataset):
         self.kp_field = kp_field
         self.assume_y_up = assume_y_up
         self.include_fingertips = include_fingertips
-
+        self.base_idx = base_idx
         # ---- 1. Load DB Once ----
         print(f"Loading PT file: {pt_path} ...")
         self.db = torch.load(pt_path, map_location="cpu",weights_only=False) # weights_only=False might be needed
@@ -159,6 +160,8 @@ class MotionAllInferenceDataset(Dataset):
             tgt_offsets=tgt_offsets,
             n_raw_offsets=self.n_raw_offsets,
             kinematic_chain=self.kinematic_chain,
+            include_fingertips=self.include_fingertips,
+            base_idx=self.base_idx,
         )
 
         # Split

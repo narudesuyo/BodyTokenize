@@ -6,15 +6,15 @@ pattern: "*.npy"
 
 # frequently changed
 use_root_loss: false
+root_keep_idx: [0, 3]          # use_root_loss:false のときに学習するroot次元
 base_idx: 15
 code_dim: 256
 K: 1024
 T: 21
 body_tokens_per_t: 40
 
-
 # eval
-eval_every: 1
+eval_every: 50
 eval_num_save_samples: 5
 eval_batch_size: 32
 eval_vis_dir: ${save_dir}/eval
@@ -34,37 +34,61 @@ wd: 0.000001
 grad_clip: 1
 log_every: 1
 ckpt_every: 1000
+
+# flowでは基本OFF推奨（必要なら sample時だけログする設定に）
 joints_loss: false
 joints_loss_weight: 5.0
+joints_loss_on_sample: false   # ★追加：sample時だけ joints_loss を計算してログする
 
 # model
-
-
 ema_decay: 0.99
 alpha_commit: 2
+
 hand_tokens_per_t: ${body_tokens_per_t}
 body_down: 1
 hand_down: 1
+
 enc_depth: 6
 enc_heads: 8
-mlp_ratio: 4.0
+enc_mlp_ratio: 4.0   # ★ "mlp_ratio" でも拾えるようにしてるならどっちでもOK
+mlp_ratio: 4.0       # 既存互換のため残す
+
 alpha_root: 5.0
 alpha_body: 1.0
 alpha_hand: 1.0
+
 enc_type_B: "cnn"
 enc_type_H: "cnn"
-enc_use_attn_B: False 
-enc_use_attn_H: False
-enc_use_pos: False
-enc_post_mlp: False
+enc_use_attn_B: false
+enc_use_attn_H: false
+enc_use_pos: false
+enc_post_mlp: false
 
-decoder_mode: recon   # or flow
-log_recon_every: 200  # flow時にサンプル生成してログする頻度（0で無効）
+# ===== flow only =====
+decoder_mode: flow
+
+# loss weights
+lambda_flow: 1.0
+lambda_entropy: 0.001
+mask_input_dims: true     # ★重要：未学習次元が他に悪影響出すのを抑える
+
+# sampling (train logging / eval)
+log_sample_every: 200     # ★旧 log_recon_every の代わり
 flow_sample_steps: 30
-flow_solver: heun     # euler or heun
-
+flow_solver: heun         # euler or heun
 flow_sample_steps_eval: 15
 flow_solver_eval: euler
+
+# flow decoder capacity
+flow_model_dim: 256       # あなたの code_dim / cnn_width に合わせて軽め
+flow_depth: 8
+flow_heads: 8
+flow_mlp_ratio: 4.0
+flow_drop: 0.0
+flow_attn_drop: 0.0
+flow_t_dim: 256
+flow_use_x_pos: true
+
 # cnn
 cnn_width_B: 256
 cnn_depth_B: 8
@@ -72,20 +96,18 @@ cnn_width_H: 256
 cnn_depth_H: 8
 cnn_dilation_max: 8
 cnn_drop: 0.0
-dec_hid: 256
 
 hand_in_dim: 480
 body_in_dim: 263
+
 
 # normalize
 normalize: true
 mean_path: ./preprocess/statistics/tips/mean.npy
 std_path: ./preprocess/statistics/tips/std.npy
 
-
 include_fingertips: true
 
-
-name: ${decoder_mode}/base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/final
+name: flow/base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/final
 save_dir: ./runs/${name}
-project: h2vq_vqvae
+project: h2vq_flow

@@ -21,7 +21,7 @@ def main():
     ap.add_argument("--config", type=str, required=True, help="Path to config.yaml")
     ap.add_argument("--ckpt", type=str, required=True, help="Path to checkpoint.pt")
     ap.add_argument("--pt_path", type=str, default="/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_tips.pt", help="Input motion .pt file")
-    ap.add_argument("--save_root", type=str, default="/large/naru/EgoHand/data/train/takes_clipped/egoexo/tok_pose/all", help="Output root dir")
+    ap.add_argument("--save_root", type=str, default="/large/naru/EgoHand/data/train/takes_clipped/egoexo/tok_pose/all_new", help="Output root dir")
     ap.add_argument("--batch_size", type=int, default=128)
     ap.add_argument("--num_workers", type=int, default=8)
     ap.add_argument("--overwrite", action="store_true")
@@ -54,6 +54,7 @@ def main():
         clip_len=20,     # Match your training clip length
         overlap=1,
         include_fingertips=args.include_fingertips,
+        base_idx=args.base_idx,
     )
 
     dl = DataLoader(
@@ -102,8 +103,7 @@ def main():
                     continue
 
                 # Stack tokens: Hand, Body -> (T, 2) -> flatten
-                token_cat = np.stack([idxH[i], idxB[i]], axis=-1).reshape(-1)
-                
+                token_cat = np.stack([idxB[i], idxH[i]], axis=-1)
                 np.savez_compressed(save_path, token_cat)
 
     print("Done.")

@@ -25,7 +25,13 @@ def batch_procrustes_align(pred, gt, eps=1e-8):
     gt_c   = gt - mu_gt
 
     H = pred_c.transpose(1, 2) @ gt_c        # (BT,3,3)
-    U, S, Vt = torch.linalg.svd(H)
+    
+    try:
+        U, S, Vt = torch.linalg.svd(H)
+    except RuntimeError:
+        # GPUで失敗したらCPUで計算（速度差は無視できるレベルです）
+        U, S, Vt = torch.linalg.svd(H.cpu())
+        U, S, Vt = U.to(H.device), S.to(H.device), Vt.to(H.device)
 
     R = Vt.transpose(1, 2) @ U.transpose(1, 2)
 
@@ -66,7 +72,12 @@ def batch_procrustes_align_sequence(
 
     # cross-covariance
     H = pred_c.transpose(1, 2) @ gt_c              # (B,3,3)
-    U, S, Vt = torch.linalg.svd(H)
+    try:
+        U, S, Vt = torch.linalg.svd(H)
+    except RuntimeError:
+        # GPUで失敗したらCPUで計算（速度差は無視できるレベルです）
+        U, S, Vt = torch.linalg.svd(H.cpu())
+        U, S, Vt = U.to(H.device), S.to(H.device), Vt.to(H.device)
 
     R = Vt.transpose(1, 2) @ U.transpose(1, 2)
 
