@@ -30,9 +30,10 @@ class MotionAllInferenceDataset(Dataset):
         assume_y_up: bool = True,
         include_fingertips: bool = False,
         base_idx: int = 0,
+        hand_local: bool = False,
     ):
         super().__init__()
-        
+        self.hand_local = hand_local
         self.clip_len = int(clip_len)
         self.overlap = int(overlap)
         self.stride = self.clip_len - self.overlap
@@ -160,8 +161,8 @@ class MotionAllInferenceDataset(Dataset):
             tgt_offsets=tgt_offsets,
             n_raw_offsets=self.n_raw_offsets,
             kinematic_chain=self.kinematic_chain,
-            include_fingertips=self.include_fingertips,
             base_idx=self.base_idx,
+            hand_local=self.hand_local,
         )
 
         # Split

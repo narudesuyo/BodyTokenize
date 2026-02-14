@@ -87,8 +87,8 @@ def evaluate_model(
 
         joints_num = 52 if not args.include_fingertips else 62
 
-        j_gt = recover_from_ric(gt_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True), base_idx=args.base_idx)
-        j_pr = recover_from_ric(pr_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True), base_idx=args.base_idx)
+        j_gt = recover_from_ric(gt_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True), base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
+        j_pr = recover_from_ric(pr_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True), base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
 
         # --- visualize ---
         if vis and it < num_save_samples:

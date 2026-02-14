@@ -4,9 +4,15 @@ data_dir: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_j
 data_dir_eval: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_val_joints_tips.pt
 pattern: "*.npy"
 
+# precomputed cache (set use_cache: true to load from precomputed pt)
+use_cache: false
+cache_pt: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_tips_cache.pt
+cache_pt_eval: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_val_joints_tips_cache.pt
+
 # frequently changed
 use_root_loss: false
 base_idx: 15
+hand_local: false
 code_dim: 256
 K: 1024
 T: 21
@@ -58,7 +64,7 @@ enc_use_attn_H: False
 enc_use_pos: False
 enc_post_mlp: False
 
-decoder_mode: recon   # or flow
+decoder_mode: vq   # or flow
 log_recon_every: 200  # flow時にサンプル生成してログする頻度（0で無効）
 flow_sample_steps: 30
 flow_solver: heun     # euler or heun
@@ -86,6 +92,6 @@ std_path: ./preprocess/statistics/tips/std.npy
 include_fingertips: true
 
 
-name: ${decoder_mode}/base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/final
+name: ${decoder_mode}/hand_local_${hand_local}/base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/final
 save_dir: ./runs/${name}
 project: h2vq_vqvae

@@ -131,7 +131,8 @@ def recover_root_rot_pos(data_t: torch.Tensor):
     return r_rot_quat, r_pos
 
 
-def recover_from_ric(data_t: torch.Tensor, joints_num: int, use_root_loss: bool = True, base_idx: int = 0):
+def recover_from_ric(data_t: torch.Tensor, joints_num: int, use_root_loss: bool = True, base_idx: int = 0,
+                     hand_local: bool = False, lh_wrist_idx: int = 20, rh_wrist_idx: int = 21):
     r_rot_quat, r_pos = recover_root_rot_pos(data_t)
     if not use_root_loss:
         # translation off
@@ -149,6 +150,24 @@ def recover_from_ric(data_t: torch.Tensor, joints_num: int, use_root_loss: bool 
     positions[..., 0] += r_pos[..., 0:1]
     positions[..., 2] += r_pos[..., 2:3]
     positions = torch.cat([positions[:,:, :base_idx], r_pos.unsqueeze(-2), positions[:,:, base_idx:]], dim=-2)
+
+    # ---- hand local: undo base XZ and add wrist position ----
+    if hand_local:
+        if joints_num > 52:  # with fingertips (62 joints)
+            lh_joints = list(range(22, 37)) + list(range(52, 57))
+            rh_joints = list(range(37, 52)) + list(range(57, 62))
+        else:
+            lh_joints = list(range(22, 37))
+            rh_joints = list(range(37, 52))
+        # Hand RIC was stored wrist-relative: R_inv*(hand - wrist).
+        # After un-rotation + base XZ add, hand = (hand - wrist) + base_XZ.
+        # Need to subtract the wrongly-added base_XZ and add wrist instead.
+        base_xz = torch.zeros_like(r_pos.unsqueeze(-2))  # (B, T, 1, 3)
+        base_xz[..., 0] = r_pos[..., 0:1]
+        base_xz[..., 2] = r_pos[..., 2:3]
+        positions[:, :, lh_joints] += positions[:, :, lh_wrist_idx:lh_wrist_idx+1] - base_xz
+        positions[:, :, rh_joints] += positions[:, :, rh_wrist_idx:rh_wrist_idx+1] - base_xz
+
     return positions
 
 

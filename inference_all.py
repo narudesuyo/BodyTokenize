@@ -55,6 +55,7 @@ def main():
         overlap=1,
         include_fingertips=args.include_fingertips,
         base_idx=args.base_idx,
+        hand_local=getattr(args, "hand_local", False),
     )
 
     dl = DataLoader(

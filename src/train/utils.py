@@ -108,6 +108,7 @@ def build_model_from_args_flow(args, device):
     flow_attn_drop = getattr(args, "flow_attn_drop", 0.0)
     flow_t_dim = getattr(args, "flow_t_dim", 512)
     flow_use_x_pos = getattr(args, "flow_use_x_pos", True)
+    flow_use_rope = getattr(args, "flow_use_rope", False)
 
     # ---- losses ----
     lambda_flow = getattr(args, "lambda_flow", 1.0)
@@ -126,6 +127,8 @@ def build_model_from_args_flow(args, device):
 
     # ---- quant ----
     do_reset = getattr(args, "do_reset", True)
+
+    cond_type = getattr(args, "cond_type", "baseline")
 
     model = H2VQFlow(
         T=T,
@@ -175,6 +178,7 @@ def build_model_from_args_flow(args, device):
         flow_attn_drop=flow_attn_drop,
         flow_t_dim=flow_t_dim,
         flow_use_x_pos=flow_use_x_pos,
+        flow_use_rope=flow_use_rope,
 
         alpha_root=alpha_root,
         alpha_body=alpha_body,
@@ -184,6 +188,7 @@ def build_model_from_args_flow(args, device):
 
         mask_input_dims=mask_input_dims,
         do_reset=do_reset,
+        cond_type=cond_type,
     ).to(device)
 
     return model

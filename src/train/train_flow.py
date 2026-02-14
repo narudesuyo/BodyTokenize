@@ -45,8 +45,9 @@ def main():
         OmegaConf.save(args, config_save_path)
 
     # ===== Dataset / Loader =====
+    _use_cache = getattr(args, "use_cache", False)
     ds = MotionDataset(
-        pt_path=args.data_dir,
+        pt_path=args.cache_pt if _use_cache else args.data_dir,
         feet_thre=getattr(args, "feet_thre", 0.002),
         kp_field=getattr(args, "kp_field", "kp3d"),
         clip_len=getattr(args, "T", 81),
@@ -55,6 +56,8 @@ def main():
         include_fingertips=getattr(args, "include_fingertips", False),
         to_torch=True,
         base_idx=args.base_idx,
+        hand_local=getattr(args, "hand_local", False),
+        use_cache=_use_cache,
     )
 
     dl = DataLoader(
@@ -68,7 +71,7 @@ def main():
     )
 
     ds_eval = MotionDataset(
-        pt_path=args.data_dir_eval,
+        pt_path=args.cache_pt_eval if _use_cache else args.data_dir_eval,
         feet_thre=getattr(args, "feet_thre", 0.002),
         kp_field=getattr(args, "kp_field", "kp3d"),
         clip_len=getattr(args, "T", 81),
@@ -77,6 +80,8 @@ def main():
         include_fingertips=getattr(args, "include_fingertips", False),
         to_torch=True,
         base_idx=args.base_idx,
+        hand_local=getattr(args, "hand_local", False),
+        use_cache=_use_cache,
     )
     dl_eval = DataLoader(
         ds_eval,
@@ -136,7 +141,7 @@ def main():
         model.train()
         t0 = time.time()
 
-        for it, batch in tqdm(enumerate(dl), desc="Training", leave=False):
+        for it, batch in tqdm(enumerate(dl), total=len(dl), desc="Training", leave=False):
             if args.eval_check:
                 break
 
@@ -198,8 +203,8 @@ def main():
 
                     gt_623 = reconstruct_623_from_body_hand(gt_dn[:, :, :263], gt_dn[:, :, 263:])
                     pred_623 = reconstruct_623_from_body_hand(pr_dn[:, :, :263], pr_dn[:, :, 263:])
-                    gt_joints = recover_from_ric(gt_623, joints_num=52, base_idx=args.base_idx)
-                    pred_joints = recover_from_ric(pred_623, joints_num=52, base_idx=args.base_idx)
+                    gt_joints = recover_from_ric(gt_623, joints_num=52, base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
+                    pred_joints = recover_from_ric(pred_623, joints_num=52, base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
 
                     gt_joints = gt_joints - gt_joints[..., :1, :]
                     pred_joints = pred_joints - pred_joints[..., :1, :]

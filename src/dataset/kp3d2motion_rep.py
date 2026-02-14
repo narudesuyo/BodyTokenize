@@ -23,7 +23,8 @@ def zup_to_yup(kp):
     return kp_yup
 
 def process_file(positions: np.ndarray, feet_thre: float, tgt_offsets: torch.Tensor, n_raw_offsets, kinematic_chain,
-                 fid_l=(7,10), fid_r=(8,11), face_joint_indx=(2,1,17,16), l_idx1=5, l_idx2=8, base_idx: int = 0):
+                 fid_l=(7,10), fid_r=(8,11), face_joint_indx=(2,1,17,16), l_idx1=5, l_idx2=8, base_idx: int = 0,
+                 hand_local: bool = False, lh_wrist_idx: int = 20, rh_wrist_idx: int = 21):
     """
     positions: (T,52,3) numpy, already Y-up
     return: data (T-1,623) numpy
@@ -126,6 +127,19 @@ def process_file(positions: np.ndarray, feet_thre: float, tgt_offsets: torch.Ten
     positions_local[..., 2] -= positions_local[:, trans_ref_idx:trans_ref_idx+1, 2]
     positions_local = qrot_np(np.repeat(r_rot_inv[:, None], positions_local.shape[1], axis=1), positions_local)
 
+    # ---- hand local: RIC positions relative to wrist ----
+    if hand_local:
+        J = positions_local.shape[1]
+        # determine hand joint ranges based on total joint count
+        if J > 52:  # with fingertips (62 joints)
+            lh_joints = list(range(22, 37)) + list(range(52, 57))   # left hand + left tips
+            rh_joints = list(range(37, 52)) + list(range(57, 62))   # right hand + right tips
+        else:       # without fingertips (52 joints)
+            lh_joints = list(range(22, 37))
+            rh_joints = list(range(37, 52))
+        positions_local[:, lh_joints] -= positions_local[:, lh_wrist_idx:lh_wrist_idx+1]
+        positions_local[:, rh_joints] -= positions_local[:, rh_wrist_idx:rh_wrist_idx+1]
+
     root_y = positions_local[:, trans_ref_idx, 1:2]                 # (T,1)
     r_velocity_y = np.arcsin(r_velocity[:, 2:3])        # (T-1,1)
     l_velocity = velocity[:, [0, 2]]                    # (T-1,2)
@@ -137,7 +151,14 @@ def process_file(positions: np.ndarray, feet_thre: float, tgt_offsets: torch.Ten
     ric_data = positions_local[:, keep_idxs].reshape(len(positions_local), -1)     # (T, (J-1)*3)
 
     local_vel = qrot_np(np.repeat(r_rot_inv[:-1, None], global_positions.shape[1], axis=1),
-                        global_positions[1:] - global_positions[:-1]).reshape(len(global_positions)-1, -1)  # (T-1, 52*3)
+                        global_positions[1:] - global_positions[:-1])  # (T-1, J, 3)
+
+    # ---- hand local: velocity relative to wrist ----
+    if hand_local:
+        local_vel[:, lh_joints] -= local_vel[:, lh_wrist_idx:lh_wrist_idx+1]
+        local_vel[:, rh_joints] -= local_vel[:, rh_wrist_idx:rh_wrist_idx+1]
+
+    local_vel = local_vel.reshape(len(global_positions)-1, -1)  # (T-1, J*3)
 
     data = root_data
     data = np.concatenate([data, ric_data[:-1]], axis=-1)
@@ -152,10 +173,12 @@ def process_file(positions: np.ndarray, feet_thre: float, tgt_offsets: torch.Ten
     return data.astype(np.float32)
 
 
-def kp3d_to_motion_rep(kp3d_52_yup: np.ndarray, feet_thre: float, tgt_offsets: torch.Tensor, n_raw_offsets, kinematic_chain, base_idx=0):
+def kp3d_to_motion_rep(kp3d_52_yup: np.ndarray, feet_thre: float, tgt_offsets: torch.Tensor, n_raw_offsets, kinematic_chain,
+                       base_idx=0, hand_local: bool = False):
     """
     kp3d_52_yup: (T,52,3) numpy, Y-up
     returns: (T-1,motion_rep_dim) numpy
     """
     kp3d_52_yup = zup_to_yup(kp3d_52_yup)
-    return process_file(kp3d_52_yup, feet_thre, tgt_offsets, n_raw_offsets, kinematic_chain, base_idx=base_idx)
+    return process_file(kp3d_52_yup, feet_thre, tgt_offsets, n_raw_offsets, kinematic_chain,
+                        base_idx=base_idx, hand_local=hand_local)

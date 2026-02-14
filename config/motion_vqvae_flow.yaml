@@ -4,17 +4,24 @@ data_dir: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_j
 data_dir_eval: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_val_joints_tips.pt
 pattern: "*.npy"
 
+# precomputed cache (set use_cache: true to load from precomputed pt)
+use_cache: true
+cache_pt: ./data/preprocessed_motion_train.pt
+cache_pt_eval: ./data/preprocessed_motion_val.pt
+
 # frequently changed
 use_root_loss: false
 root_keep_idx: [0, 3]          # use_root_loss:false のときに学習するroot次元
 base_idx: 15
+hand_local: true
 code_dim: 256
 K: 1024
 T: 21
-body_tokens_per_t: 40
+body_tokens_per_t: 4
+cond_type: "decoder_separate"
 
 # eval
-eval_every: 50
+eval_every: 10
 eval_num_save_samples: 5
 eval_batch_size: 32
 eval_vis_dir: ${save_dir}/eval
@@ -27,7 +34,7 @@ device: cuda
 num_workers: 18
 
 # training
-batch_size: 8
+batch_size: 256
 epochs: 3000
 lr: 0.00001
 wd: 0.000001
@@ -88,6 +95,7 @@ flow_drop: 0.0
 flow_attn_drop: 0.0
 flow_t_dim: 256
 flow_use_x_pos: true
+flow_use_rope: true
 
 # cnn
 cnn_width_B: 256
@@ -108,6 +116,6 @@ std_path: ./preprocess/statistics/tips/std.npy
 
 include_fingertips: true
 
-name: flow/base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/final
+name: flow/${cond_type}/hand_local_${hand_local}/base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/final
 save_dir: ./runs/${name}
 project: h2vq_flow

@@ -45,8 +45,9 @@ def main():
     # ===== Dataset / Loader =====
     # args.data_dir が「ptパス」になってる前提（必要ならyaml側で名前変えて）
 
+    _use_cache = getattr(args, "use_cache", False)
     ds = MotionDataset(
-        pt_path=args.data_dir,            # ★ここがpt
+        pt_path=args.cache_pt if _use_cache else args.data_dir,
         feet_thre=getattr(args, "feet_thre", 0.002),
         kp_field=getattr(args, "kp_field", "kp3d"),
         clip_len=getattr(args, "T", 81),          # ★80 crop
@@ -55,6 +56,8 @@ def main():
         include_fingertips=getattr(args, "include_fingertips", False),
         to_torch=True,
         base_idx=args.base_idx,
+        hand_local=getattr(args, "hand_local", False),
+        use_cache=_use_cache,
     )
 
     dl = DataLoader(
@@ -68,7 +71,7 @@ def main():
     )
 
     ds_eval = MotionDataset(
-        pt_path=args.data_dir_eval,
+        pt_path=args.cache_pt_eval if _use_cache else args.data_dir_eval,
         feet_thre=getattr(args, "feet_thre", 0.002),
         kp_field=getattr(args, "kp_field", "kp3d"),
         clip_len=getattr(args, "T", 81),
@@ -77,6 +80,8 @@ def main():
         include_fingertips=getattr(args, "include_fingertips", False),
         to_torch=True,
         base_idx=args.base_idx,
+        hand_local=getattr(args, "hand_local", False),
+        use_cache=_use_cache,
     )
     dl_eval = DataLoader(
         ds_eval,
@@ -156,8 +161,8 @@ def main():
             gt_denorm = target * std + mean
             gt_623 = reconstruct_623_from_body_hand(mB, mH)
             pred_623 = reconstruct_623_from_body_hand(recon_denorm[:, :, :263], recon_denorm[:, :, 263:])
-            gt_joints = recover_from_ric(gt_623, joints_num=52, base_idx=args.base_idx)
-            pred_joints = recover_from_ric(pred_623, joints_num=52, base_idx=args.base_idx)
+            gt_joints = recover_from_ric(gt_623, joints_num=52, base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
+            pred_joints = recover_from_ric(pred_623, joints_num=52, base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
             gt_joints = gt_joints - gt_joints[..., :1, :]
             pred_joints = pred_joints - pred_joints[..., :1, :]
 

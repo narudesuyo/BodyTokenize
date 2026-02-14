@@ -27,8 +27,12 @@ class MotionDataset(Dataset):
         include_fingertips: bool = False,
         tgt_offsets_path: str = "tgt_offsets.npy",
         base_idx: int = 0,
+        hand_local: bool = False,
+        use_cache: bool = False,
     ):
         self.base_idx = base_idx
+        self.hand_local = hand_local
+        self.use_cache = use_cache
         super().__init__()
         self.pt_path = pt_path
         self.to_torch = to_torch
@@ -48,6 +52,10 @@ class MotionDataset(Dataset):
             self.keys = list(self.db.keys())
         else:
             self.keys = list(keys)
+
+        # ---- cache mode: precomputed body/hand, skip skeleton setup ----
+        if self.use_cache:
+            return
 
         # ---- 623 block boundaries (same as your Motion623SplitDataset) ----
         if self.include_fingertips:
@@ -99,7 +107,68 @@ class MotionDataset(Dataset):
     import numpy as np
     import torch
 
+    def _getitem_cache(self, idx):
+        """Cache mode: load precomputed body/hand directly."""
+        L = self.clip_len
+        idx = int(idx) % len(self.keys)
+
+        max_resample_key = 20
+        for key_try in range(max_resample_key):
+            key = self.keys[idx]
+            item = self.db.get(key, None)
+
+            if not isinstance(item, dict) or "body" not in item or "hand" not in item:
+                idx = np.random.randint(0, len(self.keys))
+                continue
+
+            body = item["body"]  # [T, 263]
+            hand = item["hand"]  # [T, 480]
+            if torch.is_tensor(body):
+                body = body.numpy()
+            if torch.is_tensor(hand):
+                hand = hand.numpy()
+
+            Tfull = body.shape[0]
+
+            # ---------- crop / pad ----------
+            if L is not None and L > 0:
+                # clip_len is T+1 frames for raw kp3d, but precomputed is already T-1
+                # body/hand have shape [Tfull, D] where Tfull = original_frames - 1
+                target_len = L - 1  # match the original __getitem__ output length
+                if Tfull >= target_len:
+                    s = np.random.randint(0, Tfull - target_len + 1) if self.random_crop else 0
+                    body = body[s:s + target_len]
+                    hand = hand[s:s + target_len]
+                else:
+                    if self.pad_if_short:
+                        s = 0
+                        pad_body = np.repeat(body[-1:], target_len - Tfull, axis=0)
+                        pad_hand = np.repeat(hand[-1:], target_len - Tfull, axis=0)
+                        body = np.concatenate([body, pad_body], axis=0)
+                        hand = np.concatenate([hand, pad_hand], axis=0)
+                    else:
+                        idx = np.random.randint(0, len(self.keys))
+                        continue
+            else:
+                s = 0
+                target_len = Tfull
+
+            out = {
+                "key": key,
+                "T": int(body.shape[0]),
+                "body": torch.from_numpy(body).float() if self.to_torch else body,
+                "hand": torch.from_numpy(hand).float() if self.to_torch else hand,
+                "start": int(s),
+                "Tfull": int(Tfull),
+            }
+            return out
+
+        raise RuntimeError("Too many invalid samples in cache.")
+
     def __getitem__(self, idx):
+        if self.use_cache:
+            return self._getitem_cache(idx)
+
         max_try_per_key = 10
         max_resample_key = 20
         verbose_nan = True   # ★ Falseにすれば黙る
@@ -183,6 +252,7 @@ class MotionDataset(Dataset):
                     n_raw_offsets=self.n_raw_offsets,
                     kinematic_chain=self.kinematic_chain,
                     base_idx=self.base_idx,
+                    hand_local=self.hand_local,
                 )
 
                 # ---------- NaN check (arr) ----------
