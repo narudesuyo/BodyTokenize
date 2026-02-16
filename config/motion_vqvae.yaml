@@ -34,7 +34,7 @@ num_workers: 18
 
 # training
 batch_size: 256
-epochs: 3000
+epochs: 5000
 lr: 0.0001
 min_lr: 0.000001
 warmup_epochs: 50
@@ -81,7 +81,7 @@ cnn_depth_H: 8
 cnn_dilation_max: 8
 cnn_drop: 0.0
 dec_hid: 256
-dec_mode: "tri"       # "single", "dual", or "tri" (tri: body/LH/RH 3-stream, requires split_hands)
+dec_mode: "dual"       # "single", "dual", or "tri" (tri: body/LH/RH 3-stream, requires split_hands)
 split_hands: true     # split LH/RH, mirror LH, shared encoder+codebook
 dec_dual_depth: 4
 dec_dual_heads: 4
