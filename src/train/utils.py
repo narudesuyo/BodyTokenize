@@ -41,6 +41,7 @@ def build_model_from_args(args, device):
         dec_dual_mlp_ratio=getattr(args, "dec_dual_mlp_ratio", 2.0),
         mask_prob=getattr(args, "mask_prob", 0.0),
         mask_ratio=getattr(args, "mask_ratio", 0.3),
+        split_hands=getattr(args, "split_hands", False),
         alpha_root=args.alpha_root,
         alpha_body=args.alpha_body,
         alpha_hand=args.alpha_hand,        

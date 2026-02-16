@@ -1,16 +1,39 @@
 """
-Evaluate cross-modal prediction: hand-only → full body, body-only → full body.
+Evaluate cross-modal prediction with various masking modes.
 
-Loads a dual-decoder checkpoint, zeros out one modality's tokens after
-quantization, and measures how well the other modality can reconstruct
-the full motion.
+Supports all dec_mode (single/dual/tri) and split_hands configurations.
+Automatically detects available modes from the model config.
 
 Usage:
+  # auto-detect available modes from config
+  python src/evaluate/eval_cross_modal.py \
+      --ckpt runs/.../ckpt_best.pt \
+      --config config/motion_vqvae.yaml
+
+  # specify modes explicitly
   python src/evaluate/eval_cross_modal.py \
       --ckpt runs/.../ckpt_best.pt \
       --config config/motion_vqvae.yaml \
-      --modes hand2body body2hand normal \
-      --vis --num_vis 5
+      --modes normal mask_body mask_lh mask_rh rh2lh lh2rh body2hands
+
+  # with visualization
+  python src/evaluate/eval_cross_modal.py \
+      --ckpt runs/.../ckpt_best.pt \
+      --config config/motion_vqvae.yaml \
+      --vis --num_vis 10
+
+Masking modes:
+  normal      - no masking (baseline)
+  mask_body   - zero body tokens   → hands predict body
+  mask_hands  - zero all hand tokens → body predicts hands
+  mask_lh     - zero LH tokens    → body+RH predict LH  (split_hands only)
+  mask_rh     - zero RH tokens    → body+LH predict RH  (split_hands only)
+  body2hands  - zero hand tokens   → body only (same as mask_hands)
+  hand2body   - zero body tokens   → hands only (same as mask_body)
+  rh2lh       - zero body+LH      → RH predicts all     (split_hands only)
+  lh2rh       - zero body+RH      → LH predicts all     (split_hands only)
+  body2lh     - zero LH+RH        → body predicts hands  (split_hands only)
+  rh_body2lh  - zero LH           → body+RH predict LH  (same as mask_lh)
 """
 
 import sys
@@ -42,26 +65,82 @@ from src.evaluate.metric import (
 from src.util.utils import set_seed
 
 
+# ============================================================
+# Mode definitions: which tokens to zero out
+# ============================================================
+# For split_hands: zH_q = [zLH_q | zRH_q]
+# mask flags: (mask_body, mask_lh, mask_rh)
+
+MODE_MASKS = {
+    "normal":     (False, False, False),
+    "mask_body":  (True,  False, False),
+    "hand2body":  (True,  False, False),   # alias
+    "mask_hands": (False, True,  True),
+    "body2hands": (False, True,  True),    # alias
+    "mask_lh":    (False, True,  False),   # split_hands only
+    "rh_body2lh": (False, True,  False),   # alias
+    "mask_rh":    (False, False, True),    # split_hands only
+    "rh2lh":      (True,  True,  False),   # split_hands only: RH predicts all
+    "lh2rh":      (True,  False, True),    # split_hands only: LH predicts all
+    "body2lh":    (False, True,  True),    # alias for mask_hands
+}
+
+# modes that require split_hands
+SPLIT_ONLY_MODES = {"mask_lh", "mask_rh", "rh2lh", "lh2rh", "rh_body2lh"}
+
+
+def get_available_modes(model):
+    """Return list of modes available for this model config."""
+    if model.split_hands:
+        return ["normal", "mask_body", "mask_hands", "mask_lh", "mask_rh",
+                "rh2lh", "lh2rh"]
+    else:
+        return ["normal", "mask_body", "mask_hands"]
+
+
+def apply_mask(zB_q, zH_q, mode, model):
+    """Apply cross-modal masking based on mode. Returns (zB_q, zH_q)."""
+    mask_body, mask_lh, mask_rh = MODE_MASKS[mode]
+
+    if mask_body:
+        zB_q = torch.zeros_like(zB_q)
+
+    if model.split_hands:
+        per_hand_dim = model.tokens_per_hand * model.code_dim
+        if mask_lh and mask_rh:
+            zH_q = torch.zeros_like(zH_q)
+        elif mask_lh:
+            zH_q = zH_q.clone()
+            zH_q[..., :per_hand_dim] = 0.0
+        elif mask_rh:
+            zH_q = zH_q.clone()
+            zH_q[..., per_hand_dim:] = 0.0
+    else:
+        if mask_lh or mask_rh:
+            # non-split: mask_lh or mask_rh both mean mask all hands
+            zH_q = torch.zeros_like(zH_q)
+
+    return zB_q, zH_q
+
+
 @torch.no_grad()
 def evaluate_cross_modal(
     model,
     dl,
     args,
     device,
-    mode="hand2body",
+    mode="normal",
     num_save_samples=5,
     viz_dir="./eval_cross",
     vis=False,
     fps=10,
 ):
-    """
-    mode:
-      "hand2body" - zero body tokens, predict from hand only
-      "body2hand" - zero hand tokens, predict from body only
-      "normal"    - no masking (baseline)
-    """
     model.eval()
-    assert model.dec_mode == "dual", "Cross-modal eval requires dec_mode='dual'"
+    assert mode in MODE_MASKS, f"Unknown mode: {mode}. Available: {list(MODE_MASKS.keys())}"
+    if mode in SPLIT_ONLY_MODES:
+        assert model.split_hands, f"Mode '{mode}' requires split_hands=True"
+    assert model.dec_mode in ("dual", "tri"), \
+        f"Cross-modal eval requires dec_mode='dual' or 'tri', got '{model.dec_mode}'"
 
     parts = {
         "all":  slice(None),
@@ -99,9 +178,17 @@ def evaluate_cross_modal(
             mB = motion[..., :263]
             mH = motion[..., 263:]
 
-        # --- encode & quantize (reuse model internals) ---
-        zH = model.encH(mH)
+        # --- encode & quantize ---
+        if model.split_hands:
+            mLH, mRH = model._split_hands_input(mH)
+            mLH_flip = model._flip_hand(mLH)
+            zLH = model.encH(mLH_flip)
+            zRH = model.encH(mRH)
+            zH = torch.cat([zLH, zRH], dim=-1)
+        else:
+            zH = model.encH(mH)
         zB = model.encB(mB)
+
         Tm = min(zH.size(1), zB.size(1))
         zH, zB = zH[:, :Tm], zB[:, :Tm]
 
@@ -115,12 +202,8 @@ def evaluate_cross_modal(
         zB_q_tok, idxB = model.qB(zB_tok)
         zB_q = model._merge_tokens(zB_q_tok)
 
-        # --- apply cross-modal masking ---
-        if mode == "hand2body":
-            zB_q = torch.zeros_like(zB_q)
-        elif mode == "body2hand":
-            zH_q = torch.zeros_like(zH_q)
-        # else: normal, no masking
+        # --- apply masking ---
+        zB_q, zH_q = apply_mask(zB_q, zH_q, mode, model)
 
         # --- decode ---
         recon = model._decode(zB_q, zH_q)
@@ -135,14 +218,20 @@ def evaluate_cross_modal(
 
         sums["feat_mse"] += torch.mean((pr623 - gt623) ** 2).item()
 
-        gt_rec = reconstruct_623_from_body_hand(gt623[..., :263], gt623[..., 263:], include_fingertips=args.include_fingertips)
-        pr_rec = reconstruct_623_from_body_hand(pr623[..., :263], pr623[..., 263:], include_fingertips=args.include_fingertips)
+        gt_rec = reconstruct_623_from_body_hand(gt623[..., :263], gt623[..., 263:],
+                                                 include_fingertips=args.include_fingertips)
+        pr_rec = reconstruct_623_from_body_hand(pr623[..., :263], pr623[..., 263:],
+                                                 include_fingertips=args.include_fingertips)
 
         joints_num = 62 if args.include_fingertips else 52
-        j_gt = recover_from_ric(gt_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True),
-                                base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
-        j_pr = recover_from_ric(pr_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True),
-                                base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
+        j_gt = recover_from_ric(gt_rec, joints_num=joints_num,
+                                use_root_loss=getattr(args, "use_root_loss", True),
+                                base_idx=args.base_idx,
+                                hand_local=getattr(args, "hand_local", False))
+        j_pr = recover_from_ric(pr_rec, joints_num=joints_num,
+                                use_root_loss=getattr(args, "use_root_loss", True),
+                                base_idx=args.base_idx,
+                                hand_local=getattr(args, "hand_local", False))
 
         if vis and it < num_save_samples:
             for vname in ["all", "body", "hands", "lh", "rh"]:
@@ -160,7 +249,8 @@ def evaluate_cross_modal(
             jp_pa = batch_procrustes_align(jp_part, jg_part)
             sums[f"pampjpe_{name}"] += mpjpe_bt(jp_pa, jg_part, slice(None)).mean().item()
             sums[f"wa_mpjpe_{name}"] += wa_mpjpe(jp_part, jg_part, slice(None)).mean().item()
-            sums[f"w_mpjpe_{name}"] += w_mpjpe_firstk(jp_part, jg_part, slice(None), num_align_frames=1).mean().item()
+            sums[f"w_mpjpe_{name}"] += w_mpjpe_firstk(jp_part, jg_part, slice(None),
+                                                        num_align_frames=1).mean().item()
 
         sums["relative_translation_error_pelvis"] += relative_translation_error(j_pr, j_gt, ROOT_IDX).mean().item()
         sums["relative_translation_error_lh_wrist"] += relative_translation_error(j_pr, j_gt, LH_WRIST_IDX).mean().item()
@@ -193,7 +283,8 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", type=str, required=True)
     ap.add_argument("--config", type=str, default="config/motion_vqvae.yaml")
-    ap.add_argument("--modes", type=str, nargs="+", default=["hand2body", "body2hand", "normal"])
+    ap.add_argument("--modes", type=str, nargs="+", default=None,
+                    help="Masking modes to evaluate. Default: auto-detect from config.")
     ap.add_argument("--vis", action="store_true")
     ap.add_argument("--num_vis", type=int, default=5)
     args_cli = ap.parse_args()
@@ -234,10 +325,14 @@ def main():
     model.eval()
     epoch = ckpt.get("epoch", "?")
     print(f"Loaded: {args_cli.ckpt}  (epoch={epoch})")
+    print(f"Config: dec_mode={model.dec_mode}, split_hands={model.split_hands}")
+
+    # Auto-detect modes if not specified
+    modes = args_cli.modes if args_cli.modes else get_available_modes(model)
+    print(f"Modes: {modes}")
 
     viz_base = f"{args.save_dir}/eval_cross"
 
-    # Key metrics to display
     key_metrics = [
         "PA_MPJPE/all(mm)", "PA_MPJPE/body(mm)", "PA_MPJPE/lh(mm)", "PA_MPJPE/rh(mm)",
         "WA_MPJPE/all(mm)", "WA_MPJPE/body(mm)", "WA_MPJPE/lh(mm)", "WA_MPJPE/rh(mm)",
@@ -245,9 +340,11 @@ def main():
     ]
 
     results = {}
-    for mode in args_cli.modes:
+    for mode in modes:
         print(f"\n{'='*60}")
         print(f"  Mode: {mode}")
+        mask_b, mask_lh, mask_rh = MODE_MASKS[mode]
+        print(f"  Mask: body={mask_b}, LH={mask_lh}, RH={mask_rh}")
         print(f"{'='*60}")
         metrics = evaluate_cross_modal(
             model, dl_eval, args, device,
@@ -262,17 +359,17 @@ def main():
                 print(f"  {k}: {metrics[k]:.4f}")
 
     # Summary table
-    print(f"\n{'='*80}")
-    print(f"  Summary")
-    print(f"{'='*80}")
-    header = f"{'mode':>12}"
+    print(f"\n{'='*100}")
+    print(f"  Summary  (dec_mode={model.dec_mode}, split_hands={model.split_hands})")
+    print(f"{'='*100}")
+    header = f"{'mode':>14}"
     for k in key_metrics:
         short = k.split("/")[-1]
         header += f"  {short:>12}"
     print(header)
     print("-" * len(header))
-    for mode in args_cli.modes:
-        row = f"{mode:>12}"
+    for mode in modes:
+        row = f"{mode:>14}"
         for k in key_metrics:
             val = results[mode].get(k, float("nan"))
             row += f"  {val:>12.2f}"

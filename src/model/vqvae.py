@@ -92,6 +92,18 @@ def _group_norm(num_channels: int, max_groups: int = 8):
     return nn.GroupNorm(g, num_channels)
 
 
+def _build_flip_sign(n_joints: int) -> torch.Tensor:
+    """Build sign tensor for x-axis mirror of a single hand.
+    Layout per hand: [RIC(n×3), Rot6D(n×6), Vel(n×3)] = n*12 dims.
+    RIC/Vel: negate x → [-1,+1,+1] per joint.
+    Rot6D MRM (M=diag(-1,1,1)): col1→[+1,-1,-1], col2→[-1,+1,+1] per joint.
+    """
+    ric_sign = torch.tensor([-1, 1, 1], dtype=torch.float32).repeat(n_joints)    # n*3
+    rot_sign = torch.tensor([1, -1, -1, -1, 1, 1], dtype=torch.float32).repeat(n_joints)  # n*6
+    vel_sign = torch.tensor([-1, 1, 1], dtype=torch.float32).repeat(n_joints)    # n*3
+    return torch.cat([ric_sign, rot_sign, vel_sign])  # [n*12]
+
+
 # ============================================================
 # Transformer blocks (as before; used when enc_type="xformer")
 # ============================================================
@@ -455,6 +467,118 @@ class DualDecoder1D(nn.Module):
 
 
 # ============================================================
+# Tri-stream Decoder (body / LH / RH with pairwise cross-attn)
+# ============================================================
+class _TriDecoderBlock(nn.Module):
+    """One layer for 3 streams: self-conv + pairwise cross-attn + FFN.
+    Each stream has separate cross-attn weights per source (6 pairs total).
+    Updates are sequential: body → LH → RH (each sees latest state).
+    """
+    def __init__(self, dim, heads=4, mlp_ratio=2.0):
+        super().__init__()
+        hid = int(dim * mlp_ratio)
+        # 6 pairwise cross-attns: {target}_from_{source}
+        pairs = [
+            ("b", "lh"), ("b", "rh"),     # body ← LH, body ← RH
+            ("lh", "b"), ("lh", "rh"),     # LH ← body, LH ← RH
+            ("rh", "b"), ("rh", "lh"),     # RH ← body, RH ← LH
+        ]
+        self.cross = nn.ModuleDict()
+        self.cross_norm = nn.ModuleDict()
+        for tgt, src in pairs:
+            key = f"{tgt}_from_{src}"
+            self.cross[key] = _CrossAttn(dim, heads)
+            self.cross_norm[f"{key}_q"] = nn.LayerNorm(dim)
+            self.cross_norm[f"{key}_kv"] = nn.LayerNorm(dim)
+
+        # per-stream self-conv + FFN
+        self.streams = nn.ModuleDict()
+        for name in ["b", "lh", "rh"]:
+            self.streams[f"conv_{name}"] = nn.Sequential(
+                nn.Conv1d(dim, dim, 3, padding=1), nn.GELU(), _group_norm(dim),
+            )
+            self.streams[f"norm_{name}"] = nn.LayerNorm(dim)
+            self.streams[f"ffn_{name}"] = nn.Sequential(
+                nn.Linear(dim, hid), nn.GELU(), nn.Linear(hid, dim),
+            )
+
+    def _update(self, x, sources, name):
+        """self-conv → pairwise cross-attn from each source → FFN."""
+        # self-conv
+        x = x + self.streams[f"conv_{name}"](x.transpose(1, 2)).transpose(1, 2)
+        # pairwise cross-attn (separate weights per source)
+        for src_name, src_tensor in sources:
+            key = f"{name}_from_{src_name}"
+            q = self.cross_norm[f"{key}_q"](x)
+            kv = self.cross_norm[f"{key}_kv"](src_tensor)
+            x = x + self.cross[key](q, kv)
+        # FFN
+        x = x + self.streams[f"ffn_{name}"](self.streams[f"norm_{name}"](x))
+        return x
+
+    def forward(self, b, lh, rh):
+        # sequential: body → LH → RH (each sees latest state of prior streams)
+        b  = self._update(b,  [("lh", lh), ("rh", rh)], "b")
+        lh = self._update(lh, [("b", b),   ("rh", rh)], "lh")
+        rh = self._update(rh, [("b", b),   ("lh", lh)], "rh")
+        return b, lh, rh
+
+
+class TriDecoder1D(nn.Module):
+    """Separate body/LH/RH decoders with pairwise cross-attention."""
+    def __init__(self, cin_body, cin_hand, c_hid, cout_body, cout_hand,
+                 up_factor=1, depth=4, heads=4, mlp_ratio=2.0):
+        super().__init__()
+        self.up_factor = up_factor
+        self.proj_b = nn.Sequential(
+            nn.Conv1d(cin_body, c_hid, 3, padding=1), nn.GELU(), _group_norm(c_hid),
+        )
+        self.proj_lh = nn.Sequential(
+            nn.Conv1d(cin_hand, c_hid, 3, padding=1), nn.GELU(), _group_norm(c_hid),
+        )
+        self.proj_rh = nn.Sequential(
+            nn.Conv1d(cin_hand, c_hid, 3, padding=1), nn.GELU(), _group_norm(c_hid),
+        )
+        self.blocks = nn.ModuleList([
+            _TriDecoderBlock(c_hid, heads, mlp_ratio) for _ in range(depth)
+        ])
+        self.head_b = nn.Sequential(
+            nn.Conv1d(c_hid, c_hid, 3, padding=1), nn.GELU(), _group_norm(c_hid),
+            nn.Conv1d(c_hid, cout_body, 3, padding=1),
+        )
+        self.head_lh = nn.Sequential(
+            nn.Conv1d(c_hid, c_hid, 3, padding=1), nn.GELU(), _group_norm(c_hid),
+            nn.Conv1d(c_hid, cout_hand, 3, padding=1),
+        )
+        self.head_rh = nn.Sequential(
+            nn.Conv1d(c_hid, c_hid, 3, padding=1), nn.GELU(), _group_norm(c_hid),
+            nn.Conv1d(c_hid, cout_hand, 3, padding=1),
+        )
+
+    def forward(self, zB, zLH, zRH):
+        """
+        zB:  [B, cin_body, T']
+        zLH: [B, cin_hand, T']
+        zRH: [B, cin_hand, T']
+        returns: (body_out, lh_out, rh_out) each [B, cout_*, T]
+        """
+        b = self.proj_b(zB)
+        lh = self.proj_lh(zLH)
+        rh = self.proj_rh(zRH)
+        if self.up_factor > 1:
+            b = F.interpolate(b, scale_factor=self.up_factor, mode="linear", align_corners=False)
+            lh = F.interpolate(lh, scale_factor=self.up_factor, mode="linear", align_corners=False)
+            rh = F.interpolate(rh, scale_factor=self.up_factor, mode="linear", align_corners=False)
+        b, lh, rh = b.transpose(1, 2), lh.transpose(1, 2), rh.transpose(1, 2)
+        for blk in self.blocks:
+            b, lh, rh = blk(b, lh, rh)
+        b = self.head_b(b.transpose(1, 2))
+        lh = self.head_lh(lh.transpose(1, 2))
+        rh = self.head_rh(rh.transpose(1, 2))
+        return b, lh, rh
+
+
+# ============================================================
 # H2VQ
 #   enc_type_H / enc_type_B を "cnn" にすればCNNのみ
 #   CNNの容量UPは: cnn_width / cnn_depth / dilation_max を上げるだけ
@@ -500,14 +624,17 @@ class H2VQ(nn.Module):
 
         # decoder capacity
         dec_hid: int = 512,
-        dec_mode: str = "single",  # "single" or "dual"
+        dec_mode: str = "single",  # "single", "dual", or "tri"
         dec_dual_depth: int = 4,
         dec_dual_heads: int = 4,
         dec_dual_mlp_ratio: float = 2.0,
 
-        # cross-modal masking (dual decoder only)
+        # cross-modal masking (dual/tri decoder only)
         mask_prob: float = 0.0,      # prob for each of mask_body / mask_hand / mask_random
         mask_ratio: float = 0.3,     # per-token mask ratio for mask_random mode
+
+        # split hands (LH/RH separate tokenize + LH mirror)
+        split_hands: bool = False,
 
         # loss weights
         alpha_root: float = 1.0,
@@ -519,6 +646,7 @@ class H2VQ(nn.Module):
         super().__init__()
         assert enc_type_B in ["xformer", "cnn"]
         assert enc_type_H in ["xformer", "cnn"]
+        assert dec_mode in ["single", "dual", "tri"]
 
         self.T = T
         self.code_dim = code_dim
@@ -530,26 +658,45 @@ class H2VQ(nn.Module):
         self.hand_tokens_per_t = hand_tokens_per_t
         self.body_down = body_down
         self.hand_down = hand_down
+        self.split_hands = split_hands
+        self.body_in_dim = body_in_dim
+        self.hand_in_dim = hand_in_dim
 
         self.alpha_root = alpha_root
         self.alpha_body = alpha_body
         self.alpha_hand = alpha_hand
         self.use_root_loss = use_root_loss
         self.include_fingertips = include_fingertips
-        hand_out = hand_tokens_per_t * code_dim
+
+        # --- split_hands: LH/RH share one encoder + codebook ---
+        if split_hands:
+            assert hand_tokens_per_t % 2 == 0, "hand_tokens_per_t must be even for split_hands"
+            self.single_hand_dim = hand_in_dim // 2
+            self.tokens_per_hand = hand_tokens_per_t // 2
+            n_joints = self.single_hand_dim // 12  # each joint = 3(ric)+6(rot)+3(vel)
+            self.register_buffer("_flip_sign", _build_flip_sign(n_joints))
+            enc_hand_in = self.single_hand_dim
+            enc_hand_out = self.tokens_per_hand * code_dim
+        else:
+            self.single_hand_dim = hand_in_dim
+            self.tokens_per_hand = hand_tokens_per_t
+            enc_hand_in = hand_in_dim
+            enc_hand_out = hand_tokens_per_t * code_dim
+
+        hand_out = hand_tokens_per_t * code_dim  # total hand latent dim (both hands)
         body_out = body_tokens_per_t * code_dim
 
-        # ----- Hand Encoder -----
+        # ----- Hand Encoder (shared for LH/RH when split_hands) -----
         if enc_type_H == "xformer":
             self.encH = ConvXFormerEncoder1D(
-                in_dim=hand_in_dim, out_dim=hand_out,
+                in_dim=enc_hand_in, out_dim=enc_hand_out,
                 num_frames=T, temporal_compress=hand_down,
                 use_attn=enc_use_attn_H, depth=enc_depth, heads=enc_heads,
                 mlp_ratio=mlp_ratio, use_pos=enc_use_pos, post_mlp=enc_post_mlp,
             )
         else:
             self.encH = CNNEncoder1D(
-                in_dim=hand_in_dim, out_dim=hand_out,
+                in_dim=enc_hand_in, out_dim=enc_hand_out,
                 num_frames=T, temporal_compress=hand_down,
                 cnn_width=cnn_width_H, cnn_depth=cnn_depth_H,
                 cnn_kernel=cnn_kernel, dilation_max=cnn_dilation_max,
@@ -594,6 +741,20 @@ class H2VQ(nn.Module):
                 heads=dec_dual_heads,
                 mlp_ratio=dec_dual_mlp_ratio,
             )
+        elif dec_mode == "tri":
+            assert split_hands, "dec_mode='tri' requires split_hands=True"
+            per_hand_cin = self.tokens_per_hand * code_dim
+            self.dec = TriDecoder1D(
+                cin_body=body_tokens_per_t * code_dim,
+                cin_hand=per_hand_cin,
+                c_hid=dec_hid,
+                cout_body=body_in_dim,
+                cout_hand=self.single_hand_dim,
+                up_factor=body_down,
+                depth=dec_dual_depth,
+                heads=dec_dual_heads,
+                mlp_ratio=dec_dual_mlp_ratio,
+            )
         else:
             dec_in_ch = (body_tokens_per_t + hand_tokens_per_t) * code_dim
             self.dec = Decoder1D(dec_in_ch, dec_hid, body_in_dim + hand_in_dim, up_factor=body_down)
@@ -607,15 +768,70 @@ class H2VQ(nn.Module):
         B, Tp, tok, D = z_tok.shape
         return z_tok.view(B, Tp, tok * D)
     
+    def _split_hands_input(self, mH):
+        """Split mH [B,T,hand_in_dim] into (mLH, mRH) each [B,T,single_hand_dim]."""
+        nj = self.single_hand_dim // 12  # joints per hand
+        ric = nj * 3
+        rot = nj * 6
+        mLH = torch.cat([mH[..., :ric], mH[..., 2*ric:2*ric+rot], mH[..., 2*ric+2*rot:2*ric+2*rot+ric]], dim=-1)
+        mRH = torch.cat([mH[..., ric:2*ric], mH[..., 2*ric+rot:2*ric+2*rot], mH[..., 2*ric+2*rot+ric:]], dim=-1)
+        return mLH, mRH
+
+    def _flip_hand(self, h):
+        """Mirror a single hand via x-axis sign flip. h: [..., single_hand_dim]."""
+        return h * self._flip_sign
+
+    def _reassemble_hand_output(self, lh_out, rh_out):
+        """Reassemble LH + RH back into hand_in_dim format [ric_lh, ric_rh, rot_lh, rot_rh, vel_lh, vel_rh]."""
+        nj = self.single_hand_dim // 12
+        ric, rot = nj * 3, nj * 6
+        return torch.cat([
+            lh_out[..., :ric], rh_out[..., :ric],
+            lh_out[..., ric:ric+rot], rh_out[..., ric:ric+rot],
+            lh_out[..., ric+rot:], rh_out[..., ric+rot:],
+        ], dim=-1)
+
     def _decode(self, zB_q, zH_q):
-        """Shared decode logic for both forward and decode_from_ids."""
-        if self.dec_mode == "dual":
+        """Shared decode logic for both forward and decode_from_ids.
+        zH_q: when split_hands, first half is LH (in flipped/canonical space), second half is RH.
+        """
+        if self.dec_mode == "tri":
+            per_hand_dim = self.tokens_per_hand * self.code_dim
+            zLH_q = zH_q[..., :per_hand_dim]
+            zRH_q = zH_q[..., per_hand_dim:]
+            b_out, lh_out, rh_out = self.dec(
+                zB_q.permute(0, 2, 1), zLH_q.permute(0, 2, 1), zRH_q.permute(0, 2, 1))
+            # lh_out is in canonical (RH) space → flip back
+            lh_out = lh_out.permute(0, 2, 1)  # [B,T,single_hand_dim]
+            lh_out = self._flip_hand(lh_out)
+            rh_out = rh_out.permute(0, 2, 1)
+            b_out = b_out.permute(0, 2, 1)
+            hand_out = self._reassemble_hand_output(lh_out, rh_out)
+            return torch.cat([b_out, hand_out], dim=-1).contiguous()
+        elif self.dec_mode == "dual":
             recon = self.dec(zB_q.permute(0, 2, 1), zH_q.permute(0, 2, 1))
-            recon = recon.permute(0, 2, 1).contiguous()
+            recon = recon.permute(0, 2, 1)
+            if self.split_hands:
+                body_part = recon[..., :self.body_in_dim]
+                hand_part = recon[..., self.body_in_dim:]
+                lh_raw = hand_part[..., :self.single_hand_dim]
+                rh_raw = hand_part[..., self.single_hand_dim:]
+                lh_flipped = self._flip_hand(lh_raw)
+                hand_out = self._reassemble_hand_output(lh_flipped, rh_raw)
+                recon = torch.cat([body_part, hand_out], dim=-1)
+            return recon.contiguous()
         else:
             z_cat = torch.cat([zB_q, zH_q], dim=-1)
-            recon = self.dec(z_cat.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
-        return recon
+            recon = self.dec(z_cat.permute(0, 2, 1)).permute(0, 2, 1)
+            if self.split_hands:
+                body_part = recon[..., :self.body_in_dim]
+                hand_part = recon[..., self.body_in_dim:]
+                lh_raw = hand_part[..., :self.single_hand_dim]
+                rh_raw = hand_part[..., self.single_hand_dim:]
+                lh_flipped = self._flip_hand(lh_raw)
+                hand_out = self._reassemble_hand_output(lh_flipped, rh_raw)
+                recon = torch.cat([body_part, hand_out], dim=-1)
+            return recon.contiguous()
 
     def _apply_mask(self, zB_q, zH_q):
         """Cross-modal masking (training only, dual decoder only).
@@ -624,7 +840,7 @@ class H2VQ(nn.Module):
         B = zB_q.size(0)
         info = {"mask_body_frac": 0.0, "mask_hand_frac": 0.0, "mask_random_frac": 0.0}
 
-        if not self.training or self.mask_prob <= 0 or self.dec_mode != "dual":
+        if not self.training or self.mask_prob <= 0 or self.dec_mode not in ("dual", "tri"):
             return zB_q, zH_q, info
 
         p = self.mask_prob
@@ -685,13 +901,21 @@ class H2VQ(nn.Module):
 
 
     def forward(self, mB: torch.Tensor, mH: torch.Tensor):
-        zH = self.encH(mH)  # [B,T', hand_tok*D]
+        # ---- encode hands ----
+        if self.split_hands:
+            mLH, mRH = self._split_hands_input(mH)
+            mLH_flip = self._flip_hand(mLH)
+            zLH = self.encH(mLH_flip)  # [B,T', tokens_per_hand*D]
+            zRH = self.encH(mRH)       # [B,T', tokens_per_hand*D]
+            zH = torch.cat([zLH, zRH], dim=-1)  # [B,T', hand_tok*D]
+        else:
+            zH = self.encH(mH)  # [B,T', hand_tok*D]
         zB = self.encB(mB)  # [B,T', body_tok*D]
 
         Tm = min(zH.size(1), zB.size(1))
         zH, zB = zH[:, :Tm], zB[:, :Tm]
 
-        # ---- hand quantize first ----
+        # ---- hand quantize (shared codebook for LH/RH when split) ----
         zH_tok = self._split_tokens(zH, self.hand_tokens_per_t)
         zH_q_tok, idxH = self.qH(zH_tok)
         zH_q = self._merge_tokens(zH_q_tok)

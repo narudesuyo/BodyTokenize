@@ -22,10 +22,10 @@ body_tokens_per_t: 4
 # eval
 eval_every: 1
 eval_num_save_samples: 5
-eval_batch_size: 256
+eval_batch_size: 32
 eval_vis_dir: ${save_dir}/eval
 eval_save_vis_every: 100
-eval_check: false
+eval_check: true
 
 # system
 seed: 0
@@ -81,7 +81,8 @@ cnn_depth_H: 8
 cnn_dilation_max: 8
 cnn_drop: 0.0
 dec_hid: 256
-dec_mode: "dual"       # "single" or "dual" (dual: body/hand separate decoders with cross-attention)
+dec_mode: "tri"       # "single", "dual", or "tri" (tri: body/LH/RH 3-stream, requires split_hands)
+split_hands: true     # split LH/RH, mirror LH, shared encoder+codebook
 dec_dual_depth: 4
 dec_dual_heads: 4
 dec_dual_mlp_ratio: 2.0
