@@ -5,18 +5,18 @@ data_dir_eval: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_va
 pattern: "*.npy"
 
 # precomputed cache (set use_cache: true to load from precomputed pt)
-use_cache: false
-cache_pt: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_tips_cache.pt
-cache_pt_eval: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_val_joints_tips_cache.pt
+use_cache: true
+cache_pt: ./data/preprocessed_motion_train.pt
+cache_pt_eval: ./data/preprocessed_motion_val.pt
 
 # frequently changed
 use_root_loss: false
 base_idx: 15
-hand_local: false
+hand_local: true
 code_dim: 256
 K: 1024
 T: 21
-body_tokens_per_t: 40
+body_tokens_per_t: 4
 
 
 # eval
@@ -33,7 +33,7 @@ device: cuda
 num_workers: 18
 
 # training
-batch_size: 8
+batch_size: 256
 epochs: 3000
 lr: 0.00001
 wd: 0.000001
