@@ -22,7 +22,7 @@ body_tokens_per_t: 4
 # eval
 eval_every: 1
 eval_num_save_samples: 5
-eval_batch_size: 32
+eval_batch_size: 256
 eval_vis_dir: ${save_dir}/eval
 eval_save_vis_every: 100
 eval_check: false
@@ -35,7 +35,9 @@ num_workers: 18
 # training
 batch_size: 256
 epochs: 3000
-lr: 0.00001
+lr: 0.0001
+min_lr: 0.000001
+warmup_epochs: 50
 wd: 0.000001
 grad_clip: 1
 log_every: 1
@@ -79,6 +81,12 @@ cnn_depth_H: 8
 cnn_dilation_max: 8
 cnn_drop: 0.0
 dec_hid: 256
+dec_mode: "dual"       # "single" or "dual" (dual: body/hand separate decoders with cross-attention)
+dec_dual_depth: 4
+dec_dual_heads: 4
+dec_dual_mlp_ratio: 2.0
+mask_prob: 0.2          # cross-modal masking prob (0 = off, try 0.15~0.2)
+mask_ratio: 0.3           # per-token mask ratio for mask_random mode
 
 hand_in_dim: 480
 body_in_dim: 263
@@ -92,6 +100,6 @@ std_path: ./preprocess/statistics/tips/std.npy
 include_fingertips: true
 
 
-name: ${decoder_mode}/hand_local_${hand_local}/base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/final
+name: ${decoder_mode}/${dec_mode}/hand_local_${hand_local}/base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/lr_${lr}/
 save_dir: ./runs/${name}
 project: h2vq_vqvae

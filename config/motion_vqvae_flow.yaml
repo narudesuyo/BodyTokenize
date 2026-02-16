@@ -21,7 +21,7 @@ body_tokens_per_t: 4
 cond_type: "decoder_separate"
 
 # eval
-eval_every: 10
+eval_every: 1
 eval_num_save_samples: 5
 eval_batch_size: 32
 eval_vis_dir: ${save_dir}/eval
@@ -36,11 +36,17 @@ num_workers: 18
 # training
 batch_size: 256
 epochs: 3000
-lr: 0.00001
+lr: 0.0002
+min_lr: 0.000002
+warmup_epochs: 50
 wd: 0.000001
 grad_clip: 1
 log_every: 1
 ckpt_every: 1000
+
+# pretrained VQ-VAE (set path to load encoder/codebook from pretrained ckpt)
+pretrained_vqvae: ./runs/vq/hand_local_True/base_15/T_21/trans_False/token_4/code_dim_256/K_1024/lr_0.0001/ckpt_best.pt    # e.g. ./runs/vq/.../ckpt_best.pt
+freeze_encoder: true     # true: freeze encoder + codebook, train flow decoder only
 
 # flowでは基本OFF推奨（必要なら sample時だけログする設定に）
 joints_loss: false
@@ -83,8 +89,8 @@ mask_input_dims: true     # ★重要：未学習次元が他に悪影響出す�
 log_sample_every: 200     # ★旧 log_recon_every の代わり
 flow_sample_steps: 30
 flow_solver: heun         # euler or heun
-flow_sample_steps_eval: 15
-flow_solver_eval: euler
+flow_sample_steps_eval: 10
+flow_solver_eval: heun
 
 # flow decoder capacity
 flow_model_dim: 256       # あなたの code_dim / cnn_width に合わせて軽め
@@ -116,6 +122,6 @@ std_path: ./preprocess/statistics/tips/std.npy
 
 include_fingertips: true
 
-name: flow/${cond_type}/hand_local_${hand_local}/base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/final
+name: flow/${cond_type}/hand_local_${hand_local}/base_${base_idx}/T_${T}/trans_${use_root_loss}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/enc_pr_${freeze_encoder}/
 save_dir: ./runs/${name}
 project: h2vq_flow

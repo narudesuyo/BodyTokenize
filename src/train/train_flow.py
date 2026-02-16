@@ -20,6 +20,7 @@ import argparse
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from omegaconf import OmegaConf
@@ -96,6 +97,13 @@ def main():
     # ===== Model =====
     start_epoch = 1
     global_step = 0
+    best_metric = float("inf")
+
+    warmup_epochs = getattr(args, "warmup_epochs", 50)
+    min_lr = getattr(args, "min_lr", 1e-6)
+
+    pretrained_vqvae = getattr(args, "pretrained_vqvae", None)
+    freeze_encoder = getattr(args, "freeze_encoder", False)
 
     if args_cli.resume is not None:
         ckpt = torch.load(args_cli.resume, weights_only=False)
@@ -105,20 +113,57 @@ def main():
         opt.load_state_dict(ckpt["opt"])
         start_epoch = ckpt["epoch"] + 1
         global_step = ckpt["step"]
+        best_metric = ckpt.get("best_metric", float("inf"))
     else:
         model = build_model_from_args_flow(args, device)
+
+        # ===== Load pretrained VQ-VAE encoder + codebook =====
+        if pretrained_vqvae is not None:
+            print(f"[PRETRAIN] Loading encoder/codebook from {pretrained_vqvae}")
+            vq_ckpt = torch.load(pretrained_vqvae, weights_only=False)
+            vq_sd = vq_ckpt["model"]
+            # shared components between H2VQ and H2VQFlow
+            prefixes = ("encH.", "encB.", "qH.", "qB.", "hand_proj.", "fuse_proj.")
+            loaded = {k: v for k, v in vq_sd.items() if any(k.startswith(p) for p in prefixes)}
+            missing, unexpected = model.load_state_dict(loaded, strict=False)
+            print(f"[PRETRAIN] Loaded {len(loaded)} params, "
+                  f"missing(flow-only)={len(missing)}, unexpected={len(unexpected)}")
+
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
+
+    # ===== Freeze encoder + codebook =====
+    if freeze_encoder:
+        frozen_modules = [model.encH, model.encB, model.qH, model.qB,
+                          model.hand_proj, model.fuse_proj]
+        n_frozen = 0
+        for mod in frozen_modules:
+            for p in mod.parameters():
+                p.requires_grad = False
+                n_frozen += p.numel()
+        print(f"[FREEZE] Frozen encoder/codebook: {n_frozen:,} params")
+
+    # ===== LR Scheduler: Linear Warmup + Cosine Annealing =====
+    warmup_sched = LambdaLR(opt, lr_lambda=lambda ep: min(1.0, (ep + 1) / warmup_epochs))
+    cosine_sched = CosineAnnealingLR(opt, T_max=args.epochs - warmup_epochs, eta_min=min_lr)
+    scheduler = SequentialLR(opt, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_epochs])
+
+    if args_cli.resume is not None and "scheduler" in ckpt:
+        scheduler.load_state_dict(ckpt["scheduler"])
+    else:
+        # fast-forward scheduler to start_epoch
+        for _ in range(1, start_epoch):
+            scheduler.step()
 
     n_all, n_train = count_params(model)
     print("========== MODEL ==========")
     print(model)
     print("========== PARAMS =========")
     print(f"Total params     : {n_all:,}")
+    print(f"Trainable params : {n_train:,}")
     print("===========================")
 
     # ===== wandb =====
     wandb.init(project=args.project, name=args.name, config=OmegaConf.to_container(args, resolve=True))
-    wandb.watch(model, log="gradients", log_freq=200)
 
     # ===== normalization =====
     use_norm = getattr(args, "normalize", False)
@@ -238,6 +283,8 @@ def main():
 
             global_step += 1
 
+        scheduler.step()
+
         # ===== checkpoint =====
         if (epoch % args.ckpt_every) == 0:
             ckpt = {
@@ -245,6 +292,8 @@ def main():
                 "step": global_step,
                 "model": model.state_dict(),
                 "opt": opt.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "best_metric": best_metric,
                 "args": dict(args),
             }
             ckpt_path = os.path.join(args.save_dir, f"ckpt_epoch{epoch:03d}.pt")
@@ -297,6 +346,24 @@ def main():
             )
 
             wandb.log(metrics, step=global_step)
+
+            # ===== best checkpoint =====
+            cur_metric = metrics["EVAL/WA_MPJPE/all(mm)"]
+            if cur_metric < best_metric:
+                best_metric = cur_metric
+                best_ckpt = {
+                    "epoch": epoch,
+                    "step": global_step,
+                    "model": model.state_dict(),
+                    "opt": opt.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "best_metric": best_metric,
+                    "args": dict(args),
+                }
+                best_path = os.path.join(args.save_dir, "ckpt_best.pt")
+                torch.save(best_ckpt, best_path)
+                print(f"[BEST] WA_MPJPE={best_metric:.2f}mm saved: {best_path}")
+
             model.train()
 
         wandb.log({"epoch_time_sec": time.time() - t0}, step=global_step)

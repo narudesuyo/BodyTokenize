@@ -341,6 +341,120 @@ class Decoder1D(nn.Module):
 
 
 # ============================================================
+# Cross-Attention for dual decoder
+# ============================================================
+class _CrossAttn(nn.Module):
+    """Lightweight cross-attention: Q from x, KV from cond."""
+    def __init__(self, dim, heads=4):
+        super().__init__()
+        self.heads = heads
+        self.scale = (dim // heads) ** -0.5
+        self.q = nn.Linear(dim, dim)
+        self.kv = nn.Linear(dim, dim * 2)
+        self.proj = nn.Linear(dim, dim)
+
+    def forward(self, x, cond):
+        B, N, C = x.shape
+        h = self.heads
+        q = self.q(x).reshape(B, N, h, C // h).transpose(1, 2)
+        kv = self.kv(cond).reshape(B, -1, 2, h, C // h).permute(2, 0, 3, 1, 4)
+        k, v = kv[0], kv[1]
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        out = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        return self.proj(out)
+
+
+class _DualDecoderBlock(nn.Module):
+    """One layer: self-conv + cross-attn + FFN for each branch."""
+    def __init__(self, dim, heads=4, mlp_ratio=2.0):
+        super().__init__()
+        # body branch
+        self.conv_b = nn.Sequential(
+            nn.Conv1d(dim, dim, 3, padding=1), nn.GELU(), _group_norm(dim),
+        )
+        self.norm_b1 = nn.LayerNorm(dim)
+        self.cross_b = _CrossAttn(dim, heads)  # body attends to hand
+        self.norm_b2 = nn.LayerNorm(dim)
+        self.ffn_b = nn.Sequential(
+            nn.Linear(dim, int(dim * mlp_ratio)), nn.GELU(), nn.Linear(int(dim * mlp_ratio), dim),
+        )
+        # hand branch
+        self.conv_h = nn.Sequential(
+            nn.Conv1d(dim, dim, 3, padding=1), nn.GELU(), _group_norm(dim),
+        )
+        self.norm_h1 = nn.LayerNorm(dim)
+        self.cross_h = _CrossAttn(dim, heads)  # hand attends to body
+        self.norm_h2 = nn.LayerNorm(dim)
+        self.ffn_h = nn.Sequential(
+            nn.Linear(dim, int(dim * mlp_ratio)), nn.GELU(), nn.Linear(int(dim * mlp_ratio), dim),
+        )
+
+    def forward(self, b, h):
+        # b, h: [B, T, C]
+        # self-conv (channel-first)
+        b = b + self.conv_b(b.transpose(1, 2)).transpose(1, 2)
+        h = h + self.conv_h(h.transpose(1, 2)).transpose(1, 2)
+        # cross-attn
+        b = b + self.cross_b(self.norm_b1(b), self.norm_h1(h))
+        h = h + self.cross_h(self.norm_h1(h), self.norm_b1(b))
+        # FFN
+        b = b + self.ffn_b(self.norm_b2(b))
+        h = h + self.ffn_h(self.norm_h2(h))
+        return b, h
+
+
+class DualDecoder1D(nn.Module):
+    """Separate body/hand decoders with cross-attention interaction."""
+    def __init__(self, cin_body, cin_hand, c_hid, cout_body, cout_hand,
+                 up_factor=1, depth=4, heads=4, mlp_ratio=2.0):
+        super().__init__()
+        self.up_factor = up_factor
+        # project each branch to shared hidden dim
+        self.proj_b = nn.Sequential(
+            nn.Conv1d(cin_body, c_hid, 3, padding=1), nn.GELU(), _group_norm(c_hid),
+        )
+        self.proj_h = nn.Sequential(
+            nn.Conv1d(cin_hand, c_hid, 3, padding=1), nn.GELU(), _group_norm(c_hid),
+        )
+        # interaction blocks
+        self.blocks = nn.ModuleList([
+            _DualDecoderBlock(c_hid, heads, mlp_ratio) for _ in range(depth)
+        ])
+        # output heads
+        self.head_b = nn.Sequential(
+            nn.Conv1d(c_hid, c_hid, 3, padding=1), nn.GELU(), _group_norm(c_hid),
+            nn.Conv1d(c_hid, cout_body, 3, padding=1),
+        )
+        self.head_h = nn.Sequential(
+            nn.Conv1d(c_hid, c_hid, 3, padding=1), nn.GELU(), _group_norm(c_hid),
+            nn.Conv1d(c_hid, cout_hand, 3, padding=1),
+        )
+
+    def forward(self, zB, zH):
+        """
+        zB: [B, cin_body, T']  (channel-first)
+        zH: [B, cin_hand, T']  (channel-first)
+        returns: [B, cout_body + cout_hand, T]
+        """
+        b = self.proj_b(zB)  # [B, C, T']
+        h = self.proj_h(zH)  # [B, C, T']
+        # upsample before interaction
+        if self.up_factor > 1:
+            b = F.interpolate(b, scale_factor=self.up_factor, mode="linear", align_corners=False)
+            h = F.interpolate(h, scale_factor=self.up_factor, mode="linear", align_corners=False)
+        # to [B, T, C] for attention
+        b = b.transpose(1, 2)
+        h = h.transpose(1, 2)
+        for blk in self.blocks:
+            b, h = blk(b, h)
+        # back to channel-first for conv heads
+        b = self.head_b(b.transpose(1, 2))
+        h = self.head_h(h.transpose(1, 2))
+        return torch.cat([b, h], dim=1)  # [B, cout_body+cout_hand, T]
+
+
+# ============================================================
 # H2VQ
 #   enc_type_H / enc_type_B を "cnn" にすればCNNのみ
 #   CNNの容量UPは: cnn_width / cnn_depth / dilation_max を上げるだけ
@@ -386,6 +500,14 @@ class H2VQ(nn.Module):
 
         # decoder capacity
         dec_hid: int = 512,
+        dec_mode: str = "single",  # "single" or "dual"
+        dec_dual_depth: int = 4,
+        dec_dual_heads: int = 4,
+        dec_dual_mlp_ratio: float = 2.0,
+
+        # cross-modal masking (dual decoder only)
+        mask_prob: float = 0.0,      # prob for each of mask_body / mask_hand / mask_random
+        mask_ratio: float = 0.3,     # per-token mask ratio for mask_random mode
 
         # loss weights
         alpha_root: float = 1.0,
@@ -402,6 +524,8 @@ class H2VQ(nn.Module):
         self.code_dim = code_dim
         self.K = K
         self.alpha_commit = alpha_commit
+        self.mask_prob = mask_prob
+        self.mask_ratio = mask_ratio
         self.body_tokens_per_t = body_tokens_per_t
         self.hand_tokens_per_t = hand_tokens_per_t
         self.body_down = body_down
@@ -457,8 +581,22 @@ class H2VQ(nn.Module):
         self.hand_proj = nn.Linear(hand_out, hand_out)
         self.fuse_proj = nn.Linear(hand_out + body_out, body_out)
 
-        dec_in_ch = (body_tokens_per_t + hand_tokens_per_t) * code_dim
-        self.dec = Decoder1D(dec_in_ch, dec_hid, body_in_dim + hand_in_dim, up_factor=body_down)
+        self.dec_mode = dec_mode
+        if dec_mode == "dual":
+            self.dec = DualDecoder1D(
+                cin_body=body_tokens_per_t * code_dim,
+                cin_hand=hand_tokens_per_t * code_dim,
+                c_hid=dec_hid,
+                cout_body=body_in_dim,
+                cout_hand=hand_in_dim,
+                up_factor=body_down,
+                depth=dec_dual_depth,
+                heads=dec_dual_heads,
+                mlp_ratio=dec_dual_mlp_ratio,
+            )
+        else:
+            dec_in_ch = (body_tokens_per_t + hand_tokens_per_t) * code_dim
+            self.dec = Decoder1D(dec_in_ch, dec_hid, body_in_dim + hand_in_dim, up_factor=body_down)
 
     def _split_tokens(self, z_seq: torch.Tensor, tokens_per_t: int):
         B, Tp, C = z_seq.shape
@@ -469,6 +607,70 @@ class H2VQ(nn.Module):
         B, Tp, tok, D = z_tok.shape
         return z_tok.view(B, Tp, tok * D)
     
+    def _decode(self, zB_q, zH_q):
+        """Shared decode logic for both forward and decode_from_ids."""
+        if self.dec_mode == "dual":
+            recon = self.dec(zB_q.permute(0, 2, 1), zH_q.permute(0, 2, 1))
+            recon = recon.permute(0, 2, 1).contiguous()
+        else:
+            z_cat = torch.cat([zB_q, zH_q], dim=-1)
+            recon = self.dec(z_cat.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
+        return recon
+
+    def _apply_mask(self, zB_q, zH_q):
+        """Cross-modal masking (training only, dual decoder only).
+        Returns masked (zB_q, zH_q) and a dict of mask fractions for logging.
+        """
+        B = zB_q.size(0)
+        info = {"mask_body_frac": 0.0, "mask_hand_frac": 0.0, "mask_random_frac": 0.0}
+
+        if not self.training or self.mask_prob <= 0 or self.dec_mode != "dual":
+            return zB_q, zH_q, info
+
+        p = self.mask_prob
+        # per-sample random draw: [0, p) → mask_body, [p, 2p) → mask_hand,
+        # [2p, 3p) → mask_random, [3p, 1) → normal
+        rand = torch.rand(B, device=zB_q.device)
+        m_body = rand < p
+        m_hand = (rand >= p) & (rand < 2 * p)
+        m_rand = (rand >= 2 * p) & (rand < 3 * p)
+
+        # mask_body: zero out body tokens for selected samples
+        if m_body.any():
+            zB_q = zB_q.clone()
+            zB_q[m_body] = 0.0
+
+        # mask_hand: zero out hand tokens for selected samples
+        if m_hand.any():
+            zH_q = zH_q.clone()
+            zH_q[m_hand] = 0.0
+
+        # mask_random: per-token random masking on both streams
+        if m_rand.any():
+            zB_q = zB_q.clone() if not m_body.any() else zB_q  # already cloned if m_body
+            zH_q = zH_q.clone() if not m_hand.any() else zH_q
+
+            # split to token level for fine-grained masking
+            D = self.code_dim
+            n_rand = int(m_rand.sum().item())
+
+            # body tokens: [n_rand, T', body_tok, D]
+            zB_rand = zB_q[m_rand].view(n_rand, -1, self.body_tokens_per_t, D)
+            tok_mask_B = torch.rand(zB_rand.shape[:3], device=zB_q.device) < self.mask_ratio
+            zB_rand[tok_mask_B.unsqueeze(-1).expand_as(zB_rand)] = 0.0
+            zB_q[m_rand] = zB_rand.view(n_rand, -1, self.body_tokens_per_t * D)
+
+            # hand tokens: [n_rand, T', hand_tok, D]
+            zH_rand = zH_q[m_rand].view(n_rand, -1, self.hand_tokens_per_t, D)
+            tok_mask_H = torch.rand(zH_rand.shape[:3], device=zH_q.device) < self.mask_ratio
+            zH_rand[tok_mask_H.unsqueeze(-1).expand_as(zH_rand)] = 0.0
+            zH_q[m_rand] = zH_rand.view(n_rand, -1, self.hand_tokens_per_t * D)
+
+        info["mask_body_frac"] = float(m_body.sum().item()) / B
+        info["mask_hand_frac"] = float(m_hand.sum().item()) / B
+        info["mask_random_frac"] = float(m_rand.sum().item()) / B
+        return zB_q, zH_q, info
+
     def decode_from_ids(self, idxH: torch.Tensor, idxB: torch.Tensor):
         zH_q_tok = self.qH.codebook[idxH]
         zB_q_tok = self.qB.codebook[idxB]
@@ -476,10 +678,7 @@ class H2VQ(nn.Module):
         zH_q = self._merge_tokens(zH_q_tok)
         zB_q = self._merge_tokens(zB_q_tok)
 
-        z_cat = torch.cat([zB_q, zH_q], dim=-1)
-        recon = self.dec(z_cat.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
-
-        return recon
+        return self._decode(zB_q, zH_q)
 
 
 
@@ -505,9 +704,11 @@ class H2VQ(nn.Module):
         zB_q_tok, idxB = self.qB(zB_tok)
         zB_q = self._merge_tokens(zB_q_tok)
 
+        # ---- cross-modal masking (training only, dual only) ----
+        zB_q_dec, zH_q_dec, mask_info = self._apply_mask(zB_q, zH_q)
+
         # ---- decode ----
-        z_cat = torch.cat([zB_q, zH_q], dim=-1)                # [B,T', (bt+ht)*D]
-        recon = self.dec(z_cat.permute(0, 2, 1)).permute(0, 2, 1).contiguous()
+        recon = self._decode(zB_q_dec, zH_q_dec)
 
         target = torch.cat([mB, mH], dim=-1)[:, :recon.shape[1]]
 
@@ -537,7 +738,7 @@ class H2VQ(nn.Module):
         )
         loss = recon_loss + commit_loss
 
-        return recon, {
+        losses = {
             "loss": loss,
             "recon_loss": recon_loss,
             "recon_root": recon_loss_root,
@@ -546,7 +747,10 @@ class H2VQ(nn.Module):
             "commit_loss": commit_loss,
             "commit_H": commit_H,
             "commit_B": commit_B,
-        }, {"idxH": idxH, "idxB": idxB}
+        }
+        losses.update(mask_info)
+
+        return recon, losses, {"idxH": idxH, "idxB": idxB}
 
 
 # ============================================================

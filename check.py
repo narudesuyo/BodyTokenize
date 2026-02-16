@@ -1,15 +1,44 @@
-import torch
-import numpy as np
-from matplotlib import pyplot as plt
-data_dir = "/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_tips.pt"
-data = torch.load(data_dir, map_location="cpu", weights_only=False)
-data_keys = list(data.keys())
-data_item = data["fair_bike_02_10___0___1215"]
-# mean = np.load("./preprocess/statistics/motion623_fingertips_mean.npy")
-# std = np.load("./preprocess/statistics/motion623_fingertips_std.npy")
-kp3d = data_item["kp3d"]
-kp52_full = np.concatenate([kp3d[:, :22, :], kp3d[:, 25:55, :], kp3d[:, -10:, :]], axis=1)
-print(f"kp52_full shape: {kp52_full.shape}")
+# import torch
+
+# data_path = "/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_tips.pt"
+# fps = 10
+
+# data = torch.load(data_path, map_location="cpu", weights_only=False)
+
+# total_frames = 0
+# num_keys = 0
+# missing_kp3d = 0
+# bad_shape = 0
+
+# for k, v in data.items():
+#     num_keys += 1
+#     if "kp3d" not in v:
+#         missing_kp3d += 1
+#         continue
+
+#     kp3d = v["kp3d"]
+#     # kp3d: (T, J, 3) を想定
+#     if not hasattr(kp3d, "shape") or len(kp3d.shape) < 1:
+#         bad_shape += 1
+#         continue
+
+#     T = int(kp3d.shape[0])
+#     total_frames += T
+
+# total_seconds = total_frames / fps
+# total_minutes = total_seconds / 60
+# total_hours = total_minutes / 60
+
+# print(f"num_keys: {num_keys}")
+# print(f"total_frames: {total_frames}")
+# print(f"fps: {fps}")
+# print(f"total_time: {total_seconds:.1f} sec = {total_minutes:.2f} min = {total_hours:.3f} hours")
+# print(f"missing_kp3d: {missing_kp3d}, bad_shape: {bad_shape}")
+import json
+with open("/large/naru/EgoHand/data/ee4d/ee4d_motion_uniegomotion/takes.json", "r") as f:
+    takes = json.load(f)
+print(len(takes))
+
 exit()
 
 

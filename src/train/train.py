@@ -16,6 +16,7 @@ import argparse
 import numpy as np
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, SequentialLR
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import omegaconf
@@ -97,6 +98,10 @@ def main():
     # ===== Model =====
     start_epoch = 1
     global_step = 0
+    best_metric = float("inf")
+    warmup_epochs = getattr(args, "warmup_epochs", 50)
+    min_lr = getattr(args, "min_lr", 1e-6)
+
     if args_cli.resume is not None:
         ckpt = torch.load(args_cli.resume, weights_only=False)
         model = build_model_from_args(args, device)
@@ -106,9 +111,22 @@ def main():
 
         start_epoch = ckpt["epoch"] + 1
         global_step = ckpt["step"]
+        best_metric = ckpt.get("best_metric", float("inf"))
     else:
-        model = build_model_from_args(args, device) 
+        model = build_model_from_args(args, device)
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
+
+    # ===== LR Scheduler: Linear Warmup + Cosine Annealing =====
+    warmup_sched = LambdaLR(opt, lr_lambda=lambda ep: min(1.0, (ep + 1) / warmup_epochs))
+    cosine_sched = CosineAnnealingLR(opt, T_max=args.epochs - warmup_epochs, eta_min=min_lr)
+    scheduler = SequentialLR(opt, schedulers=[warmup_sched, cosine_sched], milestones=[warmup_epochs])
+
+    if args_cli.resume is not None and "scheduler" in ckpt:
+        scheduler.load_state_dict(ckpt["scheduler"])
+    else:
+        # fast-forward scheduler to start_epoch
+        for _ in range(1, start_epoch):
+            scheduler.step()
     n_all, n_train = count_params(model)
     print("========== MODEL ==========")
     print(model)  # architecture (full)
@@ -130,7 +148,7 @@ def main():
         model.train()
         t0 = time.time()
 
-        for it, batch in tqdm(enumerate(dl), desc="Training", leave=False):
+        for it, batch in tqdm(enumerate(dl), total=len(dl), desc="Training", leave=False):
             if args.eval_check:
                 break
 
@@ -211,10 +229,15 @@ def main():
                     "lr": opt.param_groups[0]["lr"],
                 }
                 log.update({k: float(v.detach()) for k, v in part_losses.items()})
+                for mk in ("mask_body_frac", "mask_hand_frac", "mask_random_frac"):
+                    if mk in losses:
+                        log[mk] = losses[mk]
 
                 wandb.log(log, step=global_step)
 
             global_step += 1
+
+        scheduler.step()
 
         # ===== checkpoint =====
         if (epoch % args.ckpt_every) == 0:
@@ -223,6 +246,8 @@ def main():
                 "step": global_step,
                 "model": model.state_dict(),
                 "opt": opt.state_dict(),
+                "scheduler": scheduler.state_dict(),
+                "best_metric": best_metric,
                 "args": vars(args),
             }
             ckpt_path = os.path.join(args.save_dir, f"ckpt_epoch{epoch:03d}.pt")
@@ -278,6 +303,23 @@ def main():
 
             # wandb
             wandb.log(metrics, step=global_step)
+
+            # ===== best checkpoint =====
+            cur_metric = metrics["EVAL/WA_MPJPE/all(mm)"]
+            if cur_metric < best_metric:
+                best_metric = cur_metric
+                best_ckpt = {
+                    "epoch": epoch,
+                    "step": global_step,
+                    "model": model.state_dict(),
+                    "opt": opt.state_dict(),
+                    "scheduler": scheduler.state_dict(),
+                    "best_metric": best_metric,
+                    "args": vars(args),
+                }
+                best_path = os.path.join(args.save_dir, "ckpt_best.pt")
+                torch.save(best_ckpt, best_path)
+                print(f"[BEST] WA_MPJPE={best_metric:.2f}mm saved: {best_path}")
 
             model.train()
 
