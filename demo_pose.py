@@ -94,13 +94,29 @@ def write_list_file(path: Path, entries: list[str]) -> None:
     path.write_text("".join(f"{entry}\n" for entry in entries), encoding="utf-8")
 
 
+def _format_eta(seconds: float | None) -> str:
+    if seconds is None:
+        return "--"
+    if seconds < 0:
+        return "--"
+    seconds = int(seconds)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f"{h}h {m}m {s}s"
+    if m > 0:
+        return f"{m}m {s}s"
+    return f"{s}s"
+
+
 def run_zip(
     data_dir: Path,
     output_dir: Path,
     split: str,
     list_path: Path,
-    expected_bytes: int | None = None,   # 追加
-    poll_sec: float = 2.0,               # 追加
+    expected_bytes: int | None = None,
+    poll_sec: float = 2.0,
 ) -> Path | None:
     if not list_path.is_file() or list_path.stat().st_size == 0:
         print(f"No files listed for {split}; skipping zip.")
@@ -108,15 +124,14 @@ def run_zip(
 
     zip_path = output_dir / f"{split}_videos.zip"
     if zip_path.exists():
-        zip_path.unlink()  # 途中再開はしない想定（必要なら消さない運用に変える）
+        zip_path.unlink()
 
     print(f"Zipping {split} files to: {zip_path}")
-    if expected_bytes:
+    if expected_bytes and expected_bytes > 0:
         print(f"Expected input size: {format_bytes(expected_bytes)}")
 
     start = time.time()
 
-    # zip を非同期起動
     with list_path.open("r", encoding="utf-8") as f:
         proc = subprocess.Popen(
             ["zip", "-0", "-@", str(zip_path)],
@@ -132,25 +147,35 @@ def run_zip(
             ret = proc.poll()
             now = time.time()
 
-            # 定期的に進捗表示
             if now - last_print >= poll_sec:
                 last_print = now
                 zipped = zip_path.stat().st_size if zip_path.exists() else 0
                 elapsed = now - start
 
+                # 速度（bytes/sec）
+                speed = (zipped / elapsed) if elapsed > 0 else 0.0
+
                 if expected_bytes and expected_bytes > 0:
                     frac = min(zipped / expected_bytes, 0.999999)
-                    speed = zipped / max(elapsed, 1e-6)  # bytes/sec
-                    remaining = (expected_bytes - zipped) / max(speed, 1e-6) if speed > 0 else float("inf")
+
+                    # ETA: zippedが増えていない/速度0 のときは出さない
+                    eta = None
+                    if zipped > 0 and speed > 0:
+                        eta = (expected_bytes - zipped) / speed
+                        # 異常値ガード（念のため）
+                        if not (0 <= eta < 1e12):
+                            eta = None
+
+                    speed_str = f"{format_bytes(int(speed))}/s" if speed > 0 else "--"
                     print(
                         f"[{split}] {format_bytes(zipped)} / {format_bytes(expected_bytes)} "
-                        f"({frac*100:.1f}%) | {format_bytes(int(speed))}/s | ETA {int(remaining)}s",
+                        f"({frac*100:.1f}%) | {speed_str} | ETA {_format_eta(eta)}",
                         flush=True,
                     )
                 else:
-                    speed = zipped / max(elapsed, 1e-6)
+                    speed_str = f"{format_bytes(int(speed))}/s" if speed > 0 else "--"
                     print(
-                        f"[{split}] zipped={format_bytes(zipped)} | {format_bytes(int(speed))}/s | elapsed {int(elapsed)}s",
+                        f"[{split}] zipped={format_bytes(zipped)} | {speed_str} | elapsed {_format_eta(elapsed)}",
                         flush=True,
                     )
 
@@ -161,8 +186,8 @@ def run_zip(
             raise subprocess.CalledProcessError(ret, proc.args)
 
     total = zip_path.stat().st_size if zip_path.exists() else 0
-    print(f"Done: {zip_path} ({format_bytes(total)}), elapsed {int(time.time() - start)}s")
-    return zip_path 
+    print(f"Done: {zip_path} ({format_bytes(total)}), elapsed {_format_eta(time.time() - start)}")
+    return zip_path
 
 
 def main() -> int:
@@ -183,7 +208,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--splits",
-        default="val,test",
+        default="train,val",
         help="Comma-separated splits to include (default: val,test).",
     )
     parser.add_argument(
