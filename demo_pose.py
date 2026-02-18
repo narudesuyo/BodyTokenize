@@ -119,6 +119,7 @@ def run_zip(
     output_dir: Path,
     split: str,
     list_path: Path,
+    expected_bytes: int | None = None,
 ) -> Path | None:
     if not list_path.is_file() or list_path.stat().st_size == 0:
         print(f"No files listed for {split}; skipping zip.")
