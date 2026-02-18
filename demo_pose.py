@@ -13,6 +13,7 @@ import random
 import subprocess
 from pathlib import Path
 import os
+import tqdm
 import time
 
 # Annotation names that count as "bodypose"
@@ -110,13 +111,14 @@ def _format_eta(seconds: float | None) -> str:
     return f"{s}s"
 
 
-def run_zip(
+from zipfile import ZipFile, ZIP_STORED
+from tqdm import tqdm
+
+def run_zip_tqdm(
     data_dir: Path,
     output_dir: Path,
     split: str,
     list_path: Path,
-    expected_bytes: int | None = None,
-    poll_sec: float = 2.0,
 ) -> Path | None:
     if not list_path.is_file() or list_path.stat().st_size == 0:
         print(f"No files listed for {split}; skipping zip.")
@@ -126,67 +128,25 @@ def run_zip(
     if zip_path.exists():
         zip_path.unlink()
 
-    print(f"Zipping {split} files to: {zip_path}")
-    if expected_bytes and expected_bytes > 0:
-        print(f"Expected input size: {format_bytes(expected_bytes)}")
+    # ファイルリスト読み込み（相対パス前提）
+    files = [line.strip() for line in list_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    print(f"[{split}] files: {len(files)}")
 
-    start = time.time()
+    # 1個でも存在チェック（早期にパス不一致を検出）
+    sample = files[0]
+    if not (data_dir / sample).exists():
+        raise FileNotFoundError(f"First path not found under data_dir: {data_dir / sample}")
 
-    with list_path.open("r", encoding="utf-8") as f:
-        proc = subprocess.Popen(
-            ["zip", "-0", "-@", str(zip_path)],
-            cwd=str(data_dir),
-            stdin=f,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.STDOUT,
-            text=True,
-        )
+    # zip作成（圧縮なし＝速い）
+    with ZipFile(zip_path, "w", compression=ZIP_STORED, allowZip64=True) as zf:
+        for rel in tqdm(files, desc=f"zipping {split}", unit="file"):
+            abs_path = data_dir / rel
+            if not abs_path.exists():
+                # 欠損はスキップしたいなら continue（厳密にしたいなら raise）
+                continue
+            zf.write(abs_path, arcname=rel)
 
-        last_print = 0.0
-        while True:
-            ret = proc.poll()
-            now = time.time()
-
-            if now - last_print >= poll_sec:
-                last_print = now
-                zipped = zip_path.stat().st_size if zip_path.exists() else 0
-                elapsed = now - start
-
-                # 速度（bytes/sec）
-                speed = (zipped / elapsed) if elapsed > 0 else 0.0
-
-                if expected_bytes and expected_bytes > 0:
-                    frac = min(zipped / expected_bytes, 0.999999)
-
-                    # ETA: zippedが増えていない/速度0 のときは出さない
-                    eta = None
-                    if zipped > 0 and speed > 0:
-                        eta = (expected_bytes - zipped) / speed
-                        # 異常値ガード（念のため）
-                        if not (0 <= eta < 1e12):
-                            eta = None
-
-                    speed_str = f"{format_bytes(int(speed))}/s" if speed > 0 else "--"
-                    print(
-                        f"[{split}] {format_bytes(zipped)} / {format_bytes(expected_bytes)} "
-                        f"({frac*100:.1f}%) | {speed_str} | ETA {_format_eta(eta)}",
-                        flush=True,
-                    )
-                else:
-                    speed_str = f"{format_bytes(int(speed))}/s" if speed > 0 else "--"
-                    print(
-                        f"[{split}] zipped={format_bytes(zipped)} | {speed_str} | elapsed {_format_eta(elapsed)}",
-                        flush=True,
-                    )
-
-            if ret is not None:
-                break
-
-        if ret != 0:
-            raise subprocess.CalledProcessError(ret, proc.args)
-
-    total = zip_path.stat().st_size if zip_path.exists() else 0
-    print(f"Done: {zip_path} ({format_bytes(total)}), elapsed {_format_eta(time.time() - start)}")
+    print(f"Done: {zip_path} ({zip_path.stat().st_size} bytes)")
     return zip_path
 
 
