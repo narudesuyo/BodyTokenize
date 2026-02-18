@@ -114,7 +114,7 @@ def _format_eta(seconds: float | None) -> str:
 from zipfile import ZipFile, ZIP_STORED
 from tqdm import tqdm
 
-def run_zip_tqdm(
+def run_zip(
     data_dir: Path,
     output_dir: Path,
     split: str,
