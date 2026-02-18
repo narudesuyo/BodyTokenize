@@ -232,6 +232,8 @@ def main() -> int:
         if take_dir.is_dir():
             for root, _, files in os.walk(take_dir):
                 for file in files:
+                    if not file.endswith(".mp4"):
+                        continue
                     abs_path = Path(root) / file
                     rel_path = abs_path.relative_to(data_dir)
                     rel_str = rel_path.as_posix()
