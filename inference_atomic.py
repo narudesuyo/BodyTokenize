@@ -240,7 +240,7 @@ def main():
                     help="Intermediate annotation JSON from prepare_atomic_clips.py. "
                          "Only samples with both ego and exo video will be processed.")
     ap.add_argument("--overwrite", action="store_true")
-    ap.add_argument("--clip-len", type=int, default=21)
+    ap.add_argument("--clip-len", type=int, default=41)
     ap.add_argument("--overlap", type=int, default=1)
     ap.add_argument("--recon", action="store_true",
                     help="Decode token IDs back to body pose and save GT-vs-Recon mp4.")
