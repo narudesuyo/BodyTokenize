@@ -44,7 +44,7 @@ def main():
         end = video_path.split("/")[-1].split(".")[0].split("___")[1]
         key = video_path.split("/")[-2] + "___" + start + "___" + end
         # save_path = os.path.join(args_cli.data_save_dir, "pose_tokens", "20", f"{sample_name}", f"{start}___{end}.npz")
-        save_dir = os.path.join(data_save_dir, "tok_pose", "all", f"{sample_name}")
+        save_dir = os.path.join(data_save_dir, "tok_pose", "all_newest", f"{sample_name}")
         os.makedirs(save_dir, exist_ok=True)
 
 
@@ -83,10 +83,9 @@ def main():
 
             idxH = idx["idxH"].detach().cpu().numpy()
             idxB = idx["idxB"].detach().cpu().numpy()
-            idx = np.concatenate([idxH, idxB], axis=-1)
+            idx = np.concatenate([idxB, idxH], axis=-1)
             if j == 0 and i == 0:
                 print(f"idx shape: {idx.shape} idxB shape: {idxB.shape} idxH shape: {idxH.shape}")
-            idx = idx.reshape(-1)
             np.savez_compressed(save_path, idx=idx)
             i += 1
         j += 1
