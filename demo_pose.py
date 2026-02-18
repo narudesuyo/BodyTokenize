@@ -127,7 +127,7 @@ def main() -> int:
     parser.add_argument("--takes-json", default=os.path.join(DATA_ROOT, "ee4d/ee4d_motion_uniegomotion/takes.json"), help="Path to takes.json.")
     parser.add_argument(
         "--annotations-key",
-        default="take_uid_to_available_annotations",
+        default="hand_pose",
         help="Key in splits.json for take_uid -> list of annotation names (default: take_uid_to_available_annotations).",
     )
     parser.add_argument(
