@@ -13,6 +13,7 @@ import random
 import subprocess
 from pathlib import Path
 import os
+import time
 
 # Annotation names that count as "bodypose"
 BODY_KEYS = {"body_pose", "bodypose", "ego_body_pose", "ego_bodypose", "egobodypose"}
@@ -98,20 +99,70 @@ def run_zip(
     output_dir: Path,
     split: str,
     list_path: Path,
+    expected_bytes: int | None = None,   # 追加
+    poll_sec: float = 2.0,               # 追加
 ) -> Path | None:
     if not list_path.is_file() or list_path.stat().st_size == 0:
         print(f"No files listed for {split}; skipping zip.")
         return None
+
     zip_path = output_dir / f"{split}_videos.zip"
+    if zip_path.exists():
+        zip_path.unlink()  # 途中再開はしない想定（必要なら消さない運用に変える）
+
     print(f"Zipping {split} files to: {zip_path}")
+    if expected_bytes:
+        print(f"Expected input size: {format_bytes(expected_bytes)}")
+
+    start = time.time()
+
+    # zip を非同期起動
     with list_path.open("r", encoding="utf-8") as f:
-        subprocess.run(
+        proc = subprocess.Popen(
             ["zip", "-0", "-@", str(zip_path)],
             cwd=str(data_dir),
             stdin=f,
-            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
+            text=True,
         )
-    return zip_path
+
+        last_print = 0.0
+        while True:
+            ret = proc.poll()
+            now = time.time()
+
+            # 定期的に進捗表示
+            if now - last_print >= poll_sec:
+                last_print = now
+                zipped = zip_path.stat().st_size if zip_path.exists() else 0
+                elapsed = now - start
+
+                if expected_bytes and expected_bytes > 0:
+                    frac = min(zipped / expected_bytes, 0.999999)
+                    speed = zipped / max(elapsed, 1e-6)  # bytes/sec
+                    remaining = (expected_bytes - zipped) / max(speed, 1e-6) if speed > 0 else float("inf")
+                    print(
+                        f"[{split}] {format_bytes(zipped)} / {format_bytes(expected_bytes)} "
+                        f"({frac*100:.1f}%) | {format_bytes(int(speed))}/s | ETA {int(remaining)}s",
+                        flush=True,
+                    )
+                else:
+                    speed = zipped / max(elapsed, 1e-6)
+                    print(
+                        f"[{split}] zipped={format_bytes(zipped)} | {format_bytes(int(speed))}/s | elapsed {int(elapsed)}s",
+                        flush=True,
+                    )
+
+            if ret is not None:
+                break
+
+        if ret != 0:
+            raise subprocess.CalledProcessError(ret, proc.args)
+
+    total = zip_path.stat().st_size if zip_path.exists() else 0
+    print(f"Done: {zip_path} ({format_bytes(total)}), elapsed {int(time.time() - start)}s")
+    return zip_path 
 
 
 def main() -> int:
@@ -261,7 +312,7 @@ def main() -> int:
     if args.run_zip:
         for split in target_splits:
             list_path = output_dir / f"{split}_video_paths.txt"
-            zip_path = run_zip(data_dir, output_dir, split, list_path)
+            zip_path = run_zip(data_dir, output_dir, split, list_path, expected_bytes=split_sizes.get(split))
             if zip_path:
                 zip_outputs.append(zip_path)
 
