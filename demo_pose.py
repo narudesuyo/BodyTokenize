@@ -123,8 +123,8 @@ def main() -> int:
         description="Generate zip file lists for val/test EgoExo4D takes (hand+body pose only).")
     parser.add_argument("--data-dir", default="/home/share/datasets/egoexo4d", help="EgoExo4D dataset root.")
     parser.add_argument("--metadata-dir", default=str(default_meta_dir), help="Metadata root.")
-    parser.add_argument("--splits-json", default=DATA_ROOT + "ee4d/annotations/splits.json", help="Path to splits.json.")
-    parser.add_argument("--takes-json", default=DATA_ROOT + "ee4d/takes.json", help="Path to takes.json.")
+    parser.add_argument("--splits-json", default=os.path.join(DATA_ROOT, "ee4d/annotations/splits.json"), help="Path to splits.json.")
+    parser.add_argument("--takes-json", default=os.path.join(DATA_ROOT, "ee4d/takes.json"), help="Path to takes.json.")
     parser.add_argument(
         "--annotations-key",
         default="take_uid_to_available_annotations",
