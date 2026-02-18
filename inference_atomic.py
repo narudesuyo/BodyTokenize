@@ -24,6 +24,10 @@ import glob
 import math
 import os
 
+_HERE = os.path.dirname(os.path.abspath(__file__))  # BodyTokenize/
+_DATA_ROOT = os.environ.get("DATA_ROOT", "/large/naru/EgoHand/data")
+_EGOEXO_DIR = os.path.join(_DATA_ROOT, "train/takes_clipped/egoexo")
+
 import matplotlib
 matplotlib.use("Agg")
 
@@ -221,15 +225,15 @@ def load_valid_sample_ids(annotation_json):
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", type=str,
-                    default="/large/naru/EgoHand/BodyTokenize/ckpt_vq/config.yaml")
+                    default=os.path.join(_HERE, "ckpt_vq/config.yaml"))
     ap.add_argument("--ckpt", type=str,
-                    default="/large/naru/EgoHand/BodyTokenize/ckpt_vq/ckpt_best.pt")
+                    default=os.path.join(_HERE, "ckpt_vq/ckpt_best.pt"))
     ap.add_argument("--motion-dir", type=str,
-                    default="/large/naru/EgoHand/data/train/takes_clipped/egoexo/motion_atomic")
+                    default=os.path.join(_EGOEXO_DIR, "motion_atomic"))
     ap.add_argument("--output-dir", type=str,
-                    default="/large/naru/EgoHand/data/train/takes_clipped/egoexo/tok_pose_atomic_40")
+                    default=os.path.join(_EGOEXO_DIR, "tok_pose_atomic_40"))
     ap.add_argument("--annotation-json", type=str,
-                    default="/large/naru/EgoHand/InternVideo/InternVideo2/multi_modality/scripts/pretraining/stage2/1B_motion/annotation_atomic_intermediate.json",
+                    default=os.path.join(_HERE, "../InternVideo/InternVideo2/multi_modality/scripts/pretraining/stage2/1B_motion/annotation_atomic_intermediate.json"),
                     help="Intermediate annotation JSON from prepare_atomic_clips.py. "
                          "Only samples with both ego and exo video will be processed.")
     ap.add_argument("--overwrite", action="store_true")
@@ -238,7 +242,7 @@ def main():
     ap.add_argument("--recon", action="store_true",
                     help="Decode token IDs back to body pose and save GT-vs-Recon mp4.")
     ap.add_argument("--recon-dir", type=str,
-                    default="/large/naru/EgoHand/BodyTokenize/recon",
+                    default=os.path.join(_HERE, "recon"),
                     help="Directory to save reconstruction mp4 files.")
     ap.add_argument("--recon-max", type=int, default=0,
                     help="Max number of samples to reconstruct (0 = all).")

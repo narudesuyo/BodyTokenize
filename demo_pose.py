@@ -12,6 +12,7 @@ import os
 import random
 import subprocess
 from pathlib import Path
+import os
 
 # Annotation names that count as "bodypose"
 BODY_KEYS = {"body_pose", "bodypose", "ego_body_pose", "ego_bodypose", "egobodypose"}
@@ -116,14 +117,14 @@ def run_zip(
 def main() -> int:
     repo_root = Path(__file__).resolve().parents[1]
     default_meta_dir = repo_root / "data" / "ee4d_motion_uniegomotion"
-    default_data_dir = os.environ.get("EGOEXO4D_DATA_DIR")
+    DATA_ROOT = os.environ.get("DATA_ROOT")
 
     parser = argparse.ArgumentParser(
         description="Generate zip file lists for val/test EgoExo4D takes (hand+body pose only).")
-    parser.add_argument("--data-dir", default=default_data_dir, help="EgoExo4D dataset root.")
+    parser.add_argument("--data-dir", default="/home/share/datasets/egoexo4d", help="EgoExo4D dataset root.")
     parser.add_argument("--metadata-dir", default=str(default_meta_dir), help="Metadata root.")
-    parser.add_argument("--splits-json", default=None, help="Path to splits.json.")
-    parser.add_argument("--takes-json", default=None, help="Path to takes.json.")
+    parser.add_argument("--splits-json", default=DATA_ROOT + "ee4d/annotations/splits.json", help="Path to splits.json.")
+    parser.add_argument("--takes-json", default=DATA_ROOT + "ee4d/takes.json", help="Path to takes.json.")
     parser.add_argument(
         "--annotations-key",
         default="take_uid_to_available_annotations",
