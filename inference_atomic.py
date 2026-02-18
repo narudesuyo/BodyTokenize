@@ -26,7 +26,9 @@ import os
 
 _HERE = os.path.dirname(os.path.abspath(__file__))  # BodyTokenize/
 _DATA_ROOT = os.environ.get("DATA_ROOT", "/large/naru/EgoHand/data")
-_EGOEXO_DIR = os.path.join(_DATA_ROOT, "train/takes_clipped/egoexo")
+_INTERNVIDEO_SCRIPT_DIR = os.path.join(
+    _HERE, "../InternVideo/InternVideo2/multi_modality/scripts/pretraining/stage2/1B_motion"
+)
 
 import matplotlib
 matplotlib.use("Agg")
@@ -211,29 +213,30 @@ class NpyMotionInferenceDataset(Dataset):
 
 
 def load_valid_sample_ids(annotation_json):
-    """Load sample IDs that have both ego and exo video from the intermediate annotation."""
+    """Load sample IDs that have at least one video (ego or exo) from the intermediate annotation."""
     import json as _json
     with open(annotation_json, "r") as f:
         entries = _json.load(f)
     valid = set()
     for entry in entries:
-        if "video_ego" in entry and "video_exo" in entry:
+        if "video_ego" in entry or "video_exo" in entry:
             valid.add(entry["sample_id"])
     return valid
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--split", choices=["train", "val"], default="train",
+                    help="Dataset split (default: train)")
     ap.add_argument("--config", type=str,
                     default=os.path.join(_HERE, "ckpt_vq/config.yaml"))
     ap.add_argument("--ckpt", type=str,
                     default=os.path.join(_HERE, "ckpt_vq/ckpt_best.pt"))
-    ap.add_argument("--motion-dir", type=str,
-                    default=os.path.join(_EGOEXO_DIR, "motion_atomic"))
-    ap.add_argument("--output-dir", type=str,
-                    default=os.path.join(_EGOEXO_DIR, "tok_pose_atomic_40"))
-    ap.add_argument("--annotation-json", type=str,
-                    default=os.path.join(_HERE, "../InternVideo/InternVideo2/multi_modality/scripts/pretraining/stage2/1B_motion/annotation_atomic_intermediate.json"),
+    ap.add_argument("--motion-dir", type=str, default=None,
+                    help="Directory of kp3d .npy files (default: {DATA_ROOT}/{split}/takes_clipped/egoexo/motion_atomic)")
+    ap.add_argument("--output-dir", type=str, default=None,
+                    help="Output directory for .npz token files (default: {DATA_ROOT}/{split}/takes_clipped/egoexo/tok_pose_atomic_40)")
+    ap.add_argument("--annotation-json", type=str, default=None,
                     help="Intermediate annotation JSON from prepare_atomic_clips.py. "
                          "Only samples with both ego and exo video will be processed.")
     ap.add_argument("--overwrite", action="store_true")
@@ -250,6 +253,18 @@ def main():
     ap.add_argument("--recon-view", type=str, default="all",
                     choices=["all", "body", "hands", "lh", "rh"])
     args = ap.parse_args()
+
+    # Resolve split-dependent defaults
+    egoexo_dir = os.path.join(_DATA_ROOT, args.split, "takes_clipped", "egoexo")
+    if args.motion_dir is None:
+        args.motion_dir = os.path.join(egoexo_dir, "motion_atomic")
+    if args.output_dir is None:
+        args.output_dir = os.path.join(egoexo_dir, "tok_pose_atomic_40")
+    if args.annotation_json is None:
+        suffix = "" if args.split == "train" else f"_{args.split}"
+        args.annotation_json = os.path.join(
+            _INTERNVIDEO_SCRIPT_DIR, f"annotation_atomic_intermediate{suffix}.json"
+        )
 
     # Load valid sample IDs (ego + exo both exist)
     valid_ids = load_valid_sample_ids(args.annotation_json)
