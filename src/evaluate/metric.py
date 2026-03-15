@@ -115,6 +115,26 @@ def wa_mpjpe(jp, jg, slc):
     jp_pa = batch_procrustes_align_sequence(jp, jg)
     return torch.norm(jp_pa.reshape(B, T*J, 3) - jg.reshape(B, T*J, 3), dim=-1).mean(dim=1)  # (B,)
 
+def w_align_firstk(jp, jg, num_align_frames=1):
+    """
+    Align pred to GT using Procrustes on the first K frames, applied to all frames.
+    jp, jg: (B, T, J, 3)
+    return: aligned_pred (B, T, J, 3)
+    """
+    B, T, J, _ = jp.shape
+    K = min(num_align_frames, T)
+    jp_init_f = jp[:, :K].reshape(B, -1, 3)
+    jg_init_f = jg[:, :K].reshape(B, -1, 3)
+    _, R, s, t = batch_procrustes_align_sequence(
+        jp_init_f.view(B, 1, -1, 3),
+        jg_init_f.view(B, 1, -1, 3),
+        return_transform=True,
+    )
+    jp_all = jp.reshape(B, -1, 3)
+    jp_aligned = s * (jp_all @ R.transpose(-1, -2)) + t
+    return jp_aligned.reshape(B, T, J, 3)
+
+
 def w_mpjpe_firstk(jp, jg, slc, num_align_frames=1):
     """
     Weighted MPJPE where Procrustes alignment is computed

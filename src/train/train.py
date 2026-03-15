@@ -2,14 +2,15 @@ import sys
 sys.path.append(".")
 
 from src.dataset.dataloader import MotionDataset
-from src.evaluate.utils import reconstruct_623_from_body_hand, recover_from_ric
+from src.evaluate.utils import recover_joints_from_body_hand
 from src.evaluate.vis import visualize_two_motions
 from src.dataset.collate import collate_stack
 from src.util.utils import count_params, set_seed, compute_part_losses
 from src.evaluate.metric import codebook_stats
-from src.evaluate.evaluator import evaluate_model
+from src.evaluate.evaluator import evaluate_model, _parse_source_list
 from src.train.utils import build_model_from_args
 import os
+import glob
 import time
 import random
 import argparse
@@ -47,6 +48,10 @@ def main():
     # args.data_dir が「ptパス」になってる前提（必要ならyaml側で名前変えて）
 
     _use_cache = getattr(args, "use_cache", False)
+    _hand_root = getattr(args, "hand_root", False)
+    _hand_only = getattr(args, "hand_only", False)
+    _debug_max = getattr(args, "debug_max_samples", 0)
+
     ds = MotionDataset(
         pt_path=args.cache_pt if _use_cache else args.data_dir,
         feet_thre=getattr(args, "feet_thre", 0.002),
@@ -59,7 +64,13 @@ def main():
         base_idx=args.base_idx,
         hand_local=getattr(args, "hand_local", False),
         use_cache=_use_cache,
+        hand_root=_hand_root,
+        hand_only=_hand_only,
     )
+    if _debug_max > 0:
+        ds.keys = ds.keys[:_debug_max]
+        ds.db = {k: ds.db[k] for k in ds.keys}
+        print(f"[DEBUG] train dataset truncated to {len(ds.keys)} samples")
 
     dl = DataLoader(
         ds,
@@ -83,17 +94,46 @@ def main():
         base_idx=args.base_idx,
         hand_local=getattr(args, "hand_local", False),
         use_cache=_use_cache,
+        hand_root=_hand_root,
+        hand_only=_hand_only,
     )
+    if _debug_max > 0:
+        ds_eval.keys = ds_eval.keys[:_debug_max]
+        ds_eval.db = {k: ds_eval.db[k] for k in ds_eval.keys}
+        print(f"[DEBUG] eval dataset truncated to {len(ds_eval.keys)} samples")
+
     dl_eval = DataLoader(
         ds_eval,
         batch_size=args.batch_size,
-        shuffle=False,
+        shuffle=True,
         num_workers=args.num_workers,
         pin_memory=True,
         drop_last=True,
         collate_fn=collate_stack,
     )
 
+    # Extra vis DataLoader: sources missing from val cache (e.g. hot3d from train)
+    _extra_vis_sources = set()
+    _val_sources = set(k.split("::")[0] for k in ds_eval.keys if "::" in k)
+    _vis_sources_cfg = _parse_source_list(getattr(args, "eval_vis_sources", None))
+    if _vis_sources_cfg:
+        for s in _vis_sources_cfg:
+            if s not in _val_sources:
+                _extra_vis_sources.add(s)
+    dl_extra_vis = None
+    if _extra_vis_sources and _use_cache:
+        import copy
+        _ds_extra = copy.copy(ds)
+        _extra_keys = [k for k in ds.keys if "::" in k and k.split("::")[0] in _extra_vis_sources]
+        if _extra_keys:
+            _ds_extra.keys = _extra_keys
+            _ds_extra.db = {k: ds.db[k] for k in _extra_keys}
+            dl_extra_vis = DataLoader(
+                _ds_extra, batch_size=min(32, len(_extra_keys)),
+                shuffle=True, num_workers=0, pin_memory=True,
+                drop_last=False, collate_fn=collate_stack,
+            )
+            print(f"[ExtraVis] {len(_extra_keys)} samples from {_extra_vis_sources} (train set)")
 
     # ===== Model =====
     start_epoch = 1
@@ -102,12 +142,19 @@ def main():
     warmup_epochs = getattr(args, "warmup_epochs", 50)
     min_lr = getattr(args, "min_lr", 1e-6)
 
+    _decoder_type = getattr(args, "decoder_type", "regressor")
+    _is_flow = _decoder_type in ("flow", "diffusion")
+
     if args_cli.resume is not None:
         ckpt = torch.load(args_cli.resume, weights_only=False)
         model = build_model_from_args(args, device)
-        model.load_state_dict(ckpt["model"])
+        # Allow loading regressor ckpt into flow model (strict=False for new flow params)
+        missing, unexpected = model.load_state_dict(ckpt["model"], strict=False)
+        if missing:
+            print(f"[WARN] Missing keys (expected for new decoder): {missing[:10]}{'...' if len(missing) > 10 else ''}")
         opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.wd)
-        opt.load_state_dict(ckpt["opt"])
+        if not missing:  # Only load opt state if model loaded fully
+            opt.load_state_dict(ckpt["opt"])
 
         start_epoch = ckpt["epoch"] + 1
         global_step = ckpt["step"]
@@ -132,38 +179,68 @@ def main():
     print(model)  # architecture (full)
     print("========== PARAMS =========")
     print(f"Total params     : {n_all:,}")
+    print(f"Trainable params : {n_train:,}")
+    print(f"Decoder type     : {_decoder_type}")
     print("===========================")
 
     # ===== wandb =====
     wandb.init(project=args.project, name=args.name, config=OmegaConf.to_container(args, resolve=True))
-    wandb.watch(model, log="gradients", log_freq=200)
+    wandb.define_metric("epoch")
+    wandb.define_metric("*", step_metric="epoch")
+    wandb.watch(model, log=None)
 
-    mean = torch.from_numpy(np.load(args.mean_path)).to(device)
-    std = torch.from_numpy(np.load(args.std_path)).to(device)
+    # Determine body/hand dims from model
+    _body_in_dim = model.body_in_dim
+    _hand_in_dim = model.hand_in_dim
+    _total_dim = _body_in_dim + _hand_in_dim
 
-    mean[0:1] = 0
-    std[0:1] = 1
+    # Compute or load normalization stats from cache
+    from src.train.utils import compute_norm_stats
+    _stats_cache_dir = os.path.join(args.save_dir, "norm_stats")
+    mean, std = compute_norm_stats(
+        args.cache_pt, body_dim=_body_in_dim, root_dim=1,
+        stats_cache_dir=_stats_cache_dir,
+    )
+    mean = mean[:_total_dim].to(device)
+    std = std[:_total_dim].to(device)
+    _hand_root_dim_total = getattr(args, "hand_root_dim", 9) * 2 if _hand_root else 0
+    _use_token_sep = getattr(args, "use_token_separation", False)
 
     for epoch in tqdm(range(start_epoch, args.epochs + 1), desc="Epochs"):
         model.train()
         t0 = time.time()
+        _epoch_loss = 0.0
+        _epoch_steps = 0
+        _epoch_comp = {}
 
         for it, batch in tqdm(enumerate(dl), total=len(dl), desc="Training", leave=False):
             if args.eval_check:
                 break
 
-            mB = batch["mB"].to(device, non_blocking=True)  # (B,T,263)
-            mH = batch["mH"].to(device, non_blocking=True)  # (B,T,360)
-            motion = torch.cat([mB, mH], dim=-1)
-            if args.normalize:
-                motion = (motion - mean) / std
-            mB = motion[:, :, :263]
-            mH = motion[:, :, 263:]
+            mB = batch["mB"].to(device, non_blocking=True)  # (B,T,body_in_dim)
+            mH = batch["mH"].to(device, non_blocking=True)  # (B,T,hand_in_dim)
+            if _hand_only:
+                # hand_only: body is zeros, only normalize hand part
+                if args.normalize:
+                    hand_mean = mean[_body_in_dim:_total_dim] if mean.shape[0] >= _total_dim else mean[_body_in_dim:]
+                    hand_std = std[_body_in_dim:_total_dim] if std.shape[0] >= _total_dim else std[_body_in_dim:]
+                    if hand_mean.shape[0] < mH.shape[-1]:
+                        pad_len = mH.shape[-1] - hand_mean.shape[0]
+                        hand_mean = torch.cat([hand_mean, torch.zeros(pad_len, device=device)])
+                        hand_std = torch.cat([hand_std, torch.ones(pad_len, device=device)])
+                    mH = (mH - hand_mean) / hand_std
+                # mB stays zeros
+            else:
+                motion = torch.cat([mB, mH], dim=-1)
+                if args.normalize:
+                    motion = (motion - mean) / std
+                mB = motion[:, :, :_body_in_dim]
+                mH = motion[:, :, _body_in_dim:]
 
-            # 念のため shape check（args.T と一致してないと落とす）
-            if mB.shape[1] != (args.T-1) or mH.shape[1] != (args.T-1):
+            # shape check
+            if mH.shape[1] != (args.T-1) or (not _hand_only and mB.shape[1] != (args.T-1)):
                 raise RuntimeError(
-                    f"Time length mismatch: got {mB.shape[1]} but args.T={args.T}. "
+                    f"Time length mismatch: got mB={mB.shape[1]} mH={mH.shape[1]} but args.T={args.T}. "
                     f"(dataset T={args.T} -> expected T={args.T-1})"
                 )
 
@@ -171,37 +248,52 @@ def main():
             recon, losses, idx = model(mB, mH)
 
             target = torch.cat([mB, mH], dim=-1)
-            part_losses = compute_part_losses(recon, target)
             loss = losses["loss"]
+            part_losses = {}
+            joints_loss = torch.tensor(0.0, device=device)
 
+            if not _is_flow:
+                # regressor: compute part losses and optional joints loss
+                part_losses = compute_part_losses(recon, target, hand_root_dim=_hand_root_dim_total)
 
-            recon_denorm = recon * std + mean
-            gt_denorm = target * std + mean
-            gt_623 = reconstruct_623_from_body_hand(mB, mH)
-            pred_623 = reconstruct_623_from_body_hand(recon_denorm[:, :, :263], recon_denorm[:, :, 263:])
-            gt_joints = recover_from_ric(gt_623, joints_num=52, base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
-            pred_joints = recover_from_ric(pred_623, joints_num=52, base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
-            gt_joints = gt_joints - gt_joints[..., :1, :]
-            pred_joints = pred_joints - pred_joints[..., :1, :]
+                if args.joints_loss:
+                    if args.normalize:
+                        if mean.shape[0] < _total_dim:
+                            mean_ext = torch.cat([mean, torch.zeros(_total_dim - mean.shape[0], device=device)])
+                            std_ext = torch.cat([std, torch.ones(_total_dim - std.shape[0], device=device)])
+                            recon_denorm = recon * std_ext + mean_ext
+                            gt_denorm = target * std_ext + mean_ext
+                        else:
+                            recon_denorm = recon * std[:_total_dim] + mean[:_total_dim]
+                            gt_denorm = target * std[:_total_dim] + mean[:_total_dim]
+                    else:
+                        recon_denorm = recon
+                        gt_denorm = target
+                    joints_num = 62 if args.include_fingertips else 52
+                    gt_joints = recover_joints_from_body_hand(
+                        gt_denorm[..., :_body_in_dim], gt_denorm[..., _body_in_dim:],
+                        include_fingertips=args.include_fingertips,
+                        hand_root_dim=_hand_root_dim_total,
+                        joints_num=joints_num,
+                        base_idx=args.base_idx,
+                        hand_local=getattr(args, "hand_local", False),
+                        hand_only=_hand_only,
+                    )
+                    pred_joints = recover_joints_from_body_hand(
+                        recon_denorm[..., :_body_in_dim], recon_denorm[..., _body_in_dim:],
+                        include_fingertips=args.include_fingertips,
+                        hand_root_dim=_hand_root_dim_total,
+                        joints_num=joints_num,
+                        base_idx=args.base_idx,
+                        hand_local=getattr(args, "hand_local", False),
+                        hand_only=_hand_only,
+                    )
+                    gt_joints = gt_joints - gt_joints[..., :1, :]
+                    pred_joints = pred_joints - pred_joints[..., :1, :]
 
-            if args.joints_loss:
-                joints_loss_weight = args.joints_loss_weight
-                joints_loss = joints_loss_weight * torch.mean((pred_joints - gt_joints) ** 2)
-                loss += joints_loss
-
-            sample = recon[0]
-
-            # if it == 0:
-            #     for i in range(sample.shape[0]):
-            #         p = sample[i, :4]
-            #         g = mB[0, i, :4]
-
-            #         print(f"  yaw   : pred={p[0]: .5f} | gt={g[0]: .5f}")
-            #         print(f"  vel_x : pred={p[1]: .5f} | gt={g[1]: .5f}")
-            #         print(f"  vel_z : pred={p[2]: .5f} | gt={g[2]: .5f}")
-            #         print(f"  root_y: pred={p[3]: .5f} | gt={g[3]: .5f}")
-            #         print("-" * 40)
-            #         break
+                    joints_loss_weight = args.joints_loss_weight
+                    joints_loss = joints_loss_weight * torch.mean((pred_joints - gt_joints) ** 2)
+                    loss += joints_loss
 
             opt.zero_grad(set_to_none=True)
             loss.backward()
@@ -209,35 +301,74 @@ def main():
                 nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             opt.step()
 
-            usageH, pplH = codebook_stats(idx["idxH"].detach(), args.K)
-            usageB, pplB = codebook_stats(idx["idxB"].detach(), args.K)
-
-            if global_step % args.log_every == 0:
-                log = {
-                    "step": global_step,
-                    "epoch": epoch,
-                    "loss": float(loss.detach()),
-                    "recon_loss": float(losses["recon_loss"].detach()),
-                    "commit_loss": float(losses["commit_loss"].detach()),
-                    "commit_H": float(losses["commit_H"].detach()),
-                    "commit_B": float(losses["commit_B"].detach()),
-                    "joints_loss": float(joints_loss.detach()) if args.joints_loss else 0,
-                    "code_usage_H": usageH,
-                    "code_usage_B": usageB,
-                    "perplexity_H": pplH,
-                    "perplexity_B": pplB,
-                    "lr": opt.param_groups[0]["lr"],
+            # Codebook stats (handle both 2-codebook and 4-codebook)
+            cb_log = {}
+            if _hand_only:
+                if _use_token_sep:
+                    for cb_name in ["HR", "HL"]:
+                        key = f"idx{cb_name}"
+                        if key in idx:
+                            u, p = codebook_stats(idx[key].detach(), args.K)
+                            cb_log[f"code_usage_{cb_name}"] = u
+                            cb_log[f"perplexity_{cb_name}"] = p
+                else:
+                    usageH, pplH = codebook_stats(idx["idxH"].detach(), args.K)
+                    cb_log = {"code_usage_H": usageH, "perplexity_H": pplH}
+            elif _use_token_sep:
+                for cb_name in ["BR", "BL", "HR", "HL"]:
+                    key = f"idx{cb_name}"
+                    if key in idx:
+                        u, p = codebook_stats(idx[key].detach(), args.K)
+                        cb_log[f"code_usage_{cb_name}"] = u
+                        cb_log[f"perplexity_{cb_name}"] = p
+            else:
+                usageH, pplH = codebook_stats(idx["idxH"].detach(), args.K)
+                usageB, pplB = codebook_stats(idx["idxB"].detach(), args.K)
+                cb_log = {
+                    "code_usage_H": usageH, "code_usage_B": usageB,
+                    "perplexity_H": pplH, "perplexity_B": pplB,
                 }
-                log.update({k: float(v.detach()) for k, v in part_losses.items()})
-                for mk in ("mask_body_frac", "mask_hand_frac", "mask_random_frac"):
-                    if mk in losses:
-                        log[mk] = losses[mk]
+            # Hand trajectory codebook
+            if "idxHT" in idx:
+                u, p = codebook_stats(idx["idxHT"].detach(), args.K)
+                cb_log["code_usage_HT"] = u
+                cb_log["perplexity_HT"] = p
 
-                wandb.log(log, step=global_step)
+            _epoch_loss += float(loss.detach())
+            _epoch_steps += 1
+
+            # Accumulate per-component losses
+            _comp_keys = ["recon_loss", "commit_loss", "flow_loss", "entropy_loss",
+                          "commit_H", "commit_B", "commit_BR", "commit_BL", "commit_HR", "commit_HL", "commit_HT",
+                          "loss_body_dec", "loss_hand_dec", "loss_full_dec",
+                          "loss_full_hand_masked", "loss_full_body_masked",
+                          "joints_loss", "joints_loss_hand", "bone_length_loss", "loss_handonly_samples"]
+            for ck in _comp_keys:
+                if ck in losses:
+                    v = losses[ck]
+                    _epoch_comp[ck] = _epoch_comp.get(ck, 0.0) + (float(v.detach()) if torch.is_tensor(v) else float(v))
+            if not _is_flow and args.joints_loss:
+                _epoch_comp["joints_loss"] = _epoch_comp.get("joints_loss", 0.0) + float(joints_loss.detach())
+            for k, v in part_losses.items():
+                _epoch_comp[k] = _epoch_comp.get(k, 0.0) + float(v.detach())
+            for k, v in cb_log.items():
+                _epoch_comp[k] = _epoch_comp.get(k, 0.0) + float(v)
 
             global_step += 1
 
         scheduler.step()
+        _n = max(_epoch_steps, 1)
+        epoch_log = {
+            "epoch": epoch,
+            "epoch_avg_loss": _epoch_loss / _n,
+            "lr": opt.param_groups[0]["lr"],
+            "epoch_time_sec": time.time() - t0,
+        }
+        for k, v in _epoch_comp.items():
+            epoch_log[f"epoch_avg_{k}"] = v / _n
+        wandb.log(epoch_log)
+        _extra = " ".join(f"{k}={v/_n:.4f}" for k, v in _epoch_comp.items() if v > 0)
+        print(f"[E{epoch:04d}] avg_loss={_epoch_loss / _n:.6f} lr={opt.param_groups[0]['lr']:.2e} {_extra}")
 
         # ===== checkpoint =====
         if (epoch % args.ckpt_every) == 0:
@@ -257,8 +388,9 @@ def main():
 
         # ===== eval (optional) =====
         eval_every = args.eval_every
-        if eval_every > 0 and (epoch % eval_every) == 0:
+        if eval_every > 0 and ((epoch % eval_every) == 0 or epoch == start_epoch):
             model.eval()
+            _do_vis = args.eval_save_vis_every > 0 and ((epoch % args.eval_save_vis_every) == 0 or epoch == start_epoch)
             metrics = evaluate_model(
                 model,
                 dl_eval,
@@ -266,46 +398,86 @@ def main():
                 device=device,
                 num_save_samples=args.eval_num_save_samples,
                 viz_dir=f"{args.eval_vis_dir}/epoch_{epoch:03d}",
-                vis=True if args.eval_save_vis_every > 0 and (epoch % args.eval_save_vis_every) == 0 else False,
+                vis=_do_vis,
+                mean=mean,
+                std=std,
+                extra_vis_dl=dl_extra_vis if _do_vis else None,
             )
 
             # print
-            print(
-                f"[E{epoch:03d} EVAL]\n"
-                f"  feat_mse={metrics['EVAL/RECON/feat_mse']:.6f}\n"
-                f"  pampjpe(mm)  all/body/lh/rh="
-                f"{metrics['EVAL/PA_MPJPE/all(mm)']:.2f}/"
-                f"{metrics['EVAL/PA_MPJPE/body(mm)']:.2f}/"
-                f"{metrics['EVAL/PA_MPJPE/lh(mm)']:.2f}/"
-                f"{metrics['EVAL/PA_MPJPE/rh(mm)']:.2f}\n"
-                f"  wa_mpjpe(mm) all/body/lh/rh="
-                f"{metrics['EVAL/WA_MPJPE/all(mm)']:.2f}/"
-                f"{metrics['EVAL/WA_MPJPE/body(mm)']:.2f}/"
-                f"{metrics['EVAL/WA_MPJPE/lh(mm)']:.2f}/"
-                f"{metrics['EVAL/WA_MPJPE/rh(mm)']:.2f}\n"
-                f"  w_mpjpe(mm)  all/body/lh/rh="
-                f"{metrics['EVAL/W_MPJPE/all(mm)']:.2f}/"
-                f"{metrics['EVAL/W_MPJPE/body(mm)']:.2f}/"
-                f"{metrics['EVAL/W_MPJPE/lh(mm)']:.2f}/"
-                f"{metrics['EVAL/W_MPJPE/rh(mm)']:.2f}\n"
-                f"  relative_translation_error(mm) pelvis/lh/rh="
-                f"{metrics['EVAL/RelativeTranslationError/pelvis(%)']:.2f}/"
-                f"{metrics['EVAL/RelativeTranslationError/lh_wrist(%)']:.2f}/"
-                f"{metrics['EVAL/RelativeTranslationError/rh_wrist(%)']:.2f}\n"
-                f"  root_translation_error(%) pelvis/lh/rh="
-                f"{metrics['EVAL/RootTranslationError/pelvis(%)']:.2f}/"
-                f"{metrics['EVAL/RootTranslationError/lh_wrist(%)']:.2f}/"
-                f"{metrics['EVAL/RootTranslationError/rh_wrist(%)']:.2f}\n"
-                f"  accel(mm/s^2) all={metrics['EVAL/ACCEL/all(mm/s^2)']:.2f}\n"
-                f"  codebook H usage/ppl={metrics['EVAL/CODEBOOK/H_usage']:.3f}/{metrics['EVAL/CODEBOOK/H_ppl']:.1f} "
-                f"B usage/ppl={metrics['EVAL/CODEBOOK/B_usage']:.3f}/{metrics['EVAL/CODEBOOK/B_ppl']:.1f}"
-            )
+            if _hand_only:
+                _m = metrics
+                print(
+                    f"[E{epoch:04d} EVAL (hand_only)]\n"
+                    f"  feat_mse={_m.get('EVAL/RECON/feat_mse', 0):.6f}\n"
+                    f"  pampjpe(mm)  lh/rh="
+                    f"{_m.get('EVAL/PA_MPJPE/lh(mm)', 0):.2f}/"
+                    f"{_m.get('EVAL/PA_MPJPE/rh(mm)', 0):.2f}\n"
+                    f"  wa_mpjpe(mm) lh/rh="
+                    f"{_m.get('EVAL/WA_MPJPE/lh(mm)', 0):.2f}/"
+                    f"{_m.get('EVAL/WA_MPJPE/rh(mm)', 0):.2f}\n"
+                    f"  w_mpjpe(mm)  lh/rh="
+                    f"{_m.get('EVAL/W_MPJPE/lh(mm)', 0):.2f}/"
+                    f"{_m.get('EVAL/W_MPJPE/rh(mm)', 0):.2f}\n"
+                    f"  codebook H usage/ppl={_m.get('EVAL/CODEBOOK/H_usage', 0):.3f}/{_m.get('EVAL/CODEBOOK/H_ppl', 0):.1f}"
+                )
+            else:
+                _m = metrics
+                print(
+                    f"[E{epoch:04d} EVAL]\n"
+                    f"  feat_mse={_m.get('EVAL/RECON/feat_mse', 0):.6f}\n"
+                    f"  pampjpe(mm)  all/body/lh/rh="
+                    f"{_m.get('EVAL/PA_MPJPE/all(mm)', 0):.2f}/"
+                    f"{_m.get('EVAL/PA_MPJPE/body(mm)', 0):.2f}/"
+                    f"{_m.get('EVAL/PA_MPJPE/lh(mm)', 0):.2f}/"
+                    f"{_m.get('EVAL/PA_MPJPE/rh(mm)', 0):.2f}\n"
+                    f"  wa_mpjpe(mm) all/body/lh/rh="
+                    f"{_m.get('EVAL/WA_MPJPE/all(mm)', 0):.2f}/"
+                    f"{_m.get('EVAL/WA_MPJPE/body(mm)', 0):.2f}/"
+                    f"{_m.get('EVAL/WA_MPJPE/lh(mm)', 0):.2f}/"
+                    f"{_m.get('EVAL/WA_MPJPE/rh(mm)', 0):.2f}\n"
+                    f"  w_mpjpe(mm)  all/body/lh/rh="
+                    f"{_m.get('EVAL/W_MPJPE/all(mm)', 0):.2f}/"
+                    f"{_m.get('EVAL/W_MPJPE/body(mm)', 0):.2f}/"
+                    f"{_m.get('EVAL/W_MPJPE/lh(mm)', 0):.2f}/"
+                    f"{_m.get('EVAL/W_MPJPE/rh(mm)', 0):.2f}\n"
+                    f"  relative_translation_error(mm) pelvis/lh/rh="
+                    f"{_m.get('EVAL/RelativeTranslationError/pelvis(%)', 0):.2f}/"
+                    f"{_m.get('EVAL/RelativeTranslationError/lh_wrist(%)', 0):.2f}/"
+                    f"{_m.get('EVAL/RelativeTranslationError/rh_wrist(%)', 0):.2f}\n"
+                    f"  root_translation_error(%) pelvis/lh/rh="
+                    f"{_m.get('EVAL/RootTranslationError/pelvis(%)', 0):.2f}/"
+                    f"{_m.get('EVAL/RootTranslationError/lh_wrist(%)', 0):.2f}/"
+                    f"{_m.get('EVAL/RootTranslationError/rh_wrist(%)', 0):.2f}\n"
+                    f"  accel(mm/s^2) all={_m.get('EVAL/ACCEL/all(mm/s^2)', 0):.2f}\n"
+                    f"  codebook H usage/ppl={_m.get('EVAL/CODEBOOK/H_usage', 0):.3f}/{_m.get('EVAL/CODEBOOK/H_ppl', 0):.1f} "
+                    f"B usage/ppl={_m.get('EVAL/CODEBOOK/B_usage', 0):.3f}/{_m.get('EVAL/CODEBOOK/B_ppl', 0):.1f}"
+                )
 
-            # wandb
-            wandb.log(metrics, step=global_step)
+            # wandb — vis mp4s (pick up to N per source)
+            _vis_dir = f"{args.eval_vis_dir}/epoch_{epoch:03d}"
+            _vis_mp4s = sorted(glob.glob(os.path.join(_vis_dir, "**/*.mp4"), recursive=True))
+            _max_per_src = getattr(args, "eval_vis_wandb_max_per_source", 10)
+            _vis_by_src = {}
+            for _mp4 in _vis_mp4s:
+                _rel = os.path.relpath(_mp4, _vis_dir)
+                _src = _rel.split(os.sep)[0]
+                _vis_by_src.setdefault(_src, []).append(_mp4)
+            for _src, _mp4s in sorted(_vis_by_src.items()):
+                for _mp4 in _mp4s[:_max_per_src]:
+                    _vkey = f"VIS/{os.path.relpath(_mp4, _vis_dir).replace(os.sep, '/')}"
+                    try:
+                        metrics[_vkey] = wandb.Video(_mp4, format="mp4")
+                    except Exception as e:
+                        print(f"[WARN] wandb.Video failed for {_mp4}: {e}")
+            metrics["epoch"] = epoch
+            wandb.log(metrics)
 
             # ===== best checkpoint =====
-            cur_metric = metrics["EVAL/WA_MPJPE/all(mm)"]
+            if _hand_only:
+                cur_metric = (metrics.get("EVAL/WA_MPJPE/lh(mm)", float("inf")) + metrics.get("EVAL/WA_MPJPE/rh(mm)", float("inf"))) / 2.0
+            else:
+                cur_metric = metrics.get("EVAL/WA_MPJPE/all(mm)", float("inf"))
             if cur_metric < best_metric:
                 best_metric = cur_metric
                 best_ckpt = {
@@ -323,7 +495,7 @@ def main():
 
             model.train()
 
-        wandb.log({"epoch_time_sec": time.time() - t0}, step=global_step)
+        # epoch_time already logged in epoch_log above
 
     wandb.finish()
 

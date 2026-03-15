@@ -5,7 +5,7 @@ import torch
 from common.skeleton import Skeleton
 from common.quaternion import (
     qbetween_np, qrot_np, qfix, qmul_np, qinv_np,
-    quaternion_to_cont6d_np
+    quaternion_to_cont6d_np,
 )
 import sys
 import os
@@ -22,9 +22,94 @@ def zup_to_yup(kp):
     kp_yup[..., 2] = -kp[..., 1]     # z = -y
     return kp_yup
 
+def _build_parent_map(kinematic_chain):
+    """Build child→parent mapping from kinematic chain lists."""
+    parent = {}
+    for chain in kinematic_chain:
+        for k in range(1, len(chain)):
+            parent[chain[k]] = chain[k - 1]
+    return parent
+
+
+def _chain_to_root(parent_map, joint_idx):
+    """Return the chain from root to joint_idx (inclusive)."""
+    chain = [joint_idx]
+    j = joint_idx
+    while j in parent_map:
+        j = parent_map[j]
+        chain.append(j)
+    chain.reverse()
+    return chain
+
+
+def _compute_hand_root(quat_params, global_positions, r_rot_inv,
+                       kinematic_chain, lh_wrist_idx, rh_wrist_idx,
+                       base_idx=0):
+    """
+    Compute per-hand root representation: 9D = wrist_vel(3) + wrist_rot6d(6).
+    All values are relative to base_idx joint (body-relative).
+
+    - wrist_vel: velocity of (wrist - base) in base-local frame
+    - wrist_rot6d: wrist rotation relative to base joint rotation
+
+    Args:
+        quat_params: (T, J, 4) local quaternion rotations
+        global_positions: (T, J, 3) world positions (after face-forward + floor removal)
+        r_rot_inv: (T, 4) inverse of base joint rotation
+        kinematic_chain: list of joint chains
+        lh_wrist_idx, rh_wrist_idx: wrist joint indices (20, 21)
+        base_idx: body reference joint index (e.g. 15 for head)
+
+    Returns:
+        lh_root: (T-1, 9) = [wrist_vel(3), wrist_rot6d(6)]
+        rh_root: (T-1, 9)
+    """
+    parent_map = _build_parent_map(kinematic_chain)
+
+    # Build global rotations via FK chain accumulation
+    T, J, _ = quat_params.shape
+    glob_rot = np.zeros_like(quat_params)  # (T, J, 4)
+    glob_rot[:, 0] = quat_params[:, 0]
+    # BFS through chains
+    visited = set([0])
+    queue = [0]
+    while queue:
+        p = queue.pop(0)
+        for chain in kinematic_chain:
+            for k in range(1, len(chain)):
+                if chain[k - 1] == p and chain[k] not in visited:
+                    c = chain[k]
+                    glob_rot[:, c] = qmul_np(glob_rot[:, p], quat_params[:, c])
+                    visited.add(c)
+                    queue.append(c)
+
+    # Base joint rotation (for body-relative computation)
+    glob_base_rot = glob_rot[:, base_idx]  # (T, 4)
+    glob_base_rot_inv = qinv_np(glob_base_rot)  # (T, 4)
+
+    results = []
+    for wrist_idx in [lh_wrist_idx, rh_wrist_idx]:
+        # Wrist position relative to base joint: (T, 3)
+        wrist_rel_pos = global_positions[:, wrist_idx] - global_positions[:, base_idx]
+
+        # Velocity of relative position, rotated to base-local frame: (T-1, 3)
+        wrist_rel_vel = wrist_rel_pos[1:] - wrist_rel_pos[:-1]  # (T-1, 3)
+        wrist_rel_vel = qrot_np(glob_base_rot_inv[1:], wrist_rel_vel)  # (T-1, 3)
+
+        # Wrist rotation relative to base joint as cont6d: (T-1, 6)
+        wrist_rot_rel = qmul_np(glob_base_rot_inv[:-1], glob_rot[:-1, wrist_idx])  # (T-1, 4)
+        wrist_rot6d = quaternion_to_cont6d_np(wrist_rot_rel)  # (T-1, 6)
+
+        hand_root = np.concatenate([wrist_rel_vel, wrist_rot6d], axis=-1)  # (T-1, 9)
+        results.append(hand_root)
+
+    return results[0], results[1]
+
+
 def process_file(positions: np.ndarray, feet_thre: float, tgt_offsets: torch.Tensor, n_raw_offsets, kinematic_chain,
                  fid_l=(7,10), fid_r=(8,11), face_joint_indx=(2,1,17,16), l_idx1=5, l_idx2=8, base_idx: int = 0,
-                 hand_local: bool = False, lh_wrist_idx: int = 20, rh_wrist_idx: int = 21):
+                 hand_local: bool = False, lh_wrist_idx: int = 20, rh_wrist_idx: int = 21,
+                 compute_hand_root: bool = False):
     """
     positions: (T,52,3) numpy, already Y-up
     return: data (T-1,623) numpy
@@ -170,15 +255,55 @@ def process_file(positions: np.ndarray, feet_thre: float, tgt_offsets: torch.Ten
     # r_velocity: (T-1,4) with [w,x,y,z]
     d_half_from_quat = np.arctan2(r_velocity[:, 2], r_velocity[:, 0])  # (T-1,)
     rot_vel = r_velocity_y[:, 0]                                       # (T-1,)
-    return data.astype(np.float32)
+
+    if not compute_hand_root:
+        return data.astype(np.float32)
+
+    # ---- hand root: wrist velocity + rotation per hand (body-relative) ----
+    lh_root, rh_root = _compute_hand_root(
+        quat_params, global_positions, r_rot_inv,
+        kinematic_chain, lh_wrist_idx, rh_wrist_idx,
+        base_idx=base_idx)
+    return data.astype(np.float32), lh_root.astype(np.float32), rh_root.astype(np.float32)
 
 
-def kp3d_to_motion_rep(kp3d_52_yup: np.ndarray, feet_thre: float, tgt_offsets: torch.Tensor, n_raw_offsets, kinematic_chain,
-                       base_idx=0, hand_local: bool = False):
+def kp3d_to_motion_rep(
+    kp3d_52_yup: np.ndarray,
+    feet_thre: float,
+    tgt_offsets: torch.Tensor,
+    n_raw_offsets,
+    kinematic_chain,
+    base_idx=0,
+    hand_local: bool = False,
+    input_up_axis: str = "z",
+    compute_hand_root: bool = False,
+):
     """
-    kp3d_52_yup: (T,52,3) numpy, Y-up
-    returns: (T-1,motion_rep_dim) numpy
+    kp3d_52_yup: (T,52,3) numpy
+      - input_up_axis="z": input is Z-up (legacy default, backward compatible)
+      - input_up_axis="y": input is already Y-up
+      - input_up_axis="auto": detect and convert to Y-up
+    returns:
+      - compute_hand_root=False: (T-1, motion_rep_dim) numpy
+      - compute_hand_root=True:  ((T-1, motion_rep_dim), (T-1, 9), (T-1, 9)) numpy
     """
-    kp3d_52_yup = zup_to_yup(kp3d_52_yup)
-    return process_file(kp3d_52_yup, feet_thre, tgt_offsets, n_raw_offsets, kinematic_chain,
-                        base_idx=base_idx, hand_local=hand_local)
+    if input_up_axis == "z":
+        kp3d_yup = zup_to_yup(kp3d_52_yup)
+    elif input_up_axis == "y":
+        kp3d_yup = np.asarray(kp3d_52_yup, dtype=np.float32)
+    elif input_up_axis == "auto":
+        kp3d_yup, _, _ = unify_clip_to_y_up(kp3d_52_yup)
+        kp3d_yup = np.asarray(kp3d_yup, dtype=np.float32)
+    else:
+        raise ValueError(f"Unknown input_up_axis={input_up_axis}. Expected one of: z, y, auto")
+
+    return process_file(
+        kp3d_yup,
+        feet_thre,
+        tgt_offsets,
+        n_raw_offsets,
+        kinematic_chain,
+        base_idx=base_idx,
+        hand_local=hand_local,
+        compute_hand_root=compute_hand_root,
+    )

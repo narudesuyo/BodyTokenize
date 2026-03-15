@@ -1,10 +1,18 @@
+# Mix3 (EE4D + A101 + HOT3D): hand root + token separation + three decoders + joints loss (clip21)
+# HOT3D samples (body=zeros) routed to hand-only decoder only
+
+# data
 data_base_dir: /large/naru/EgoHand/data
 data_dir: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_train_joints_tips.pt
 data_dir_eval: ${data_base_dir}/ee4d/ee4d_motion_uniegomotion/uniegomotion/ee_val_joints_tips.pt
-pattern: '*.npy'
+pattern: "*.npy"
+
+# precomputed cache
 use_cache: true
-cache_pt: ./data/mix2_train_cache_clip21_base15_handroot.pt
-cache_pt_eval: ./data/mix2_val_cache_clip21_base15_handroot.pt
+cache_pt: ./data/mix_val_cache_clip21_base15_handroot_new.pt
+cache_pt_eval: ./data/mix_val_cache_clip21_base15_handroot_new.pt
+
+# frequently changed
 use_root_loss: false
 base_idx: 15
 hand_local: true
@@ -12,30 +20,38 @@ code_dim: 256
 K: 1024
 T: 21
 body_tokens_per_t: 4
+
+# eval (no hot3d in val set - test split is empty)
 eval_every: 10
 eval_num_save_samples: 5
 eval_batch_size: 32
 eval_vis_dir: ${save_dir}/eval
 eval_save_vis_every: 50
 eval_vis_balance_sources: true
-eval_vis_sources: ee4d,a101
+eval_vis_sources: "ee4d,a101,hot3d"
 eval_vis_num_per_source: 1
 eval_check: false
+
+# system
 seed: 0
 device: cuda
 num_workers: 2
+
+# training
 debug_max_samples: 0
 batch_size: 512
 epochs: 1000
 lr: 0.001
 min_lr: 0.0001
 warmup_epochs: 50
-wd: 1.0e-06
+wd: 0.000001
 grad_clip: 1
 log_every: 1
 ckpt_every: 1000
 joints_loss: true
 joints_loss_weight: 5.0
+
+# model
 decoder_type: regressor
 ema_decay: 0.99
 alpha_commit: 2
@@ -50,14 +66,17 @@ alpha_body: 1.0
 alpha_hand: 10.0
 alpha_joints: 5.0
 alpha_joints_hand: 5.0
-enc_type_B: cnn
-enc_type_H: cnn
-enc_use_attn_B: false
-enc_use_attn_H: false
-enc_use_pos: false
-enc_post_mlp: false
+enc_type_B: "cnn"
+enc_type_H: "cnn"
+enc_use_attn_B: False
+enc_use_attn_H: False
+enc_use_pos: False
+enc_post_mlp: False
+
 decoder_mode: vq
 log_recon_every: 200
+
+# cnn
 cnn_width_B: 256
 cnn_depth_B: 8
 cnn_width_H: 256
@@ -65,32 +84,45 @@ cnn_depth_H: 8
 cnn_dilation_max: 8
 cnn_drop: 0.0
 dec_hid: 256
-dec_mode: dual
+dec_mode: "dual"
 split_hands: true
 dec_dual_depth: 4
 dec_dual_heads: 4
 dec_dual_mlp_ratio: 2.0
 mask_prob: 0.2
 mask_ratio: 0.3
+
+# dims with hand root (498 = 480 + 18)
 hand_in_dim: 498
 body_in_dim: 263
+
+# Hand root: ON
 hand_root: true
 hand_root_dim: 9
+
+# Fusion: OFF
 use_fuse: false
+
+# Token separation: ON (4 codebooks)
 use_token_separation: true
 body_root_tokens_per_t: 1
 body_local_tokens_per_t: 3
 hand_root_tokens_per_t: 1
 hand_local_tokens_per_t: 1
+
+# Three decoders: ON
 use_three_decoders: true
 alpha_body_dec: 1.0
 alpha_hand_dec: 1.0
 alpha_full_dec: 1.0
+
+# normalize
 normalize: true
 mean_path: ./preprocess/statistics/tips/mean.npy
 std_path: ./preprocess/statistics/tips/std.npy
+
 include_fingertips: true
-name: mix2_clip21_handroot_tokensep_joints/regressor/${dec_mode}/T_${T}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/
+
+name: mix3_valtest/regressor/${dec_mode}/T_${T}/token_${body_tokens_per_t}/code_dim_${code_dim}/K_${K}/
 save_dir: ./runs/${name}
-project: motion_vqvae_mix2
-resume: null
+project: motion_vqvae_mix3

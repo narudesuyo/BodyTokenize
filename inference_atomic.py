@@ -3,17 +3,19 @@
 Reads individual kp3d .npy files (from prepare_atomic_clips.py), runs the
 VQ-VAE model to produce tokenized pose indices, and saves as .npz files.
 
+All .npy files are loaded into a single batch dataset for efficient
+parallel processing (batch_size=128, num_workers=8 by default).
+
 With --recon, also decodes token IDs back to body pose and saves
 GT-vs-Reconstructed skeleton visualizations as .mp4 files.
 
 Usage:
     DATA_ROOT=/large/naru/EgoHand/data python inference_atomic.py \
-        --motion-dir /large/naru/EgoHand/data/train/takes_clipped/egoexo/motion_atomic \
-        --output-dir /large/naru/EgoHand/data/train/takes_clipped/egoexo/tok_pose_atomic
+        --split train
 
     # With reconstruction visualization:
     DATA_ROOT=/large/naru/EgoHand/data python inference_atomic.py \
-        --motion-dir ... --output-dir ... --recon --recon-max 20
+        --split train --recon --recon-max 20
 """
 
 import sys
@@ -21,7 +23,6 @@ sys.path.append(".")
 
 import argparse
 import glob
-import math
 import os
 
 _HERE = os.path.dirname(os.path.abspath(__file__))  # BodyTokenize/
@@ -50,7 +51,6 @@ except ImportError:
         print()
 
 from src.train.utils import build_model_from_args
-from src.dataset.collate import collate_stack
 from src.dataset.kp3d2motion_rep import kp3d_to_motion_rep
 from src.evaluate.utils import reconstruct_623_from_body_hand, recover_from_ric
 from src.evaluate.vis import visualize_two_motions
@@ -63,43 +63,38 @@ from preprocess.paramUtil_add_tips import (
 from common.skeleton import Skeleton
 
 
-class NpyMotionInferenceDataset(Dataset):
-    """Load a single kp3d .npy file and yield sliding-window clips.
+class NpyMotionAtomicBatchDataset(Dataset):
+    """Load all atomic kp3d .npy files for batch inference.
 
-    Mirrors MotionInferenceDataset but reads from a .npy file instead of a .pt dict.
+    Each .npy file contains exactly 41 frames (fixed by prepare_atomic_clips.py).
+    One file = one sample, no sliding window needed.
     """
 
     def __init__(
         self,
-        npy_path: str,
-        clip_len: int = 80,
-        overlap: int = 0,
-        feet_thre: float = 0.002,
-        include_fingertips: bool = False,
-        hand_local: bool = False,
-        base_idx: int = 0,
+        npy_files,  # list of (npy_path, take_name, sample_id)
+        clip_len=41,
+        feet_thre=0.002,
+        include_fingertips=False,
+        hand_local=False,
+        base_idx=0,
     ):
         super().__init__()
-
-        self.npy_path = npy_path
-        self.clip_len = int(clip_len)
-        self.overlap = int(overlap)
-        self.stride = self.clip_len - self.overlap
+        self.npy_files = npy_files
+        self.clip_len = clip_len
         self.feet_thre = feet_thre
         self.include_fingertips = include_fingertips
         self.hand_local = hand_local
         self.base_idx = base_idx
 
-        # Load kp3d [T, 154, 3]
-        kp = np.load(npy_path).astype(np.float32)
-        if kp.ndim != 3 or kp.shape[2] != 3:
-            raise ValueError(f"Bad kp3d shape: {kp.shape}, expected (T, J, 3)")
-
-        # Block boundaries (same as MotionInferenceDataset)
-        if self.include_fingertips:
+        if include_fingertips:
             self.NO_ROOT_J = 61
+            self.n_raw_offsets = torch.from_numpy(t2m_raw_offsets_with_tips).float()
+            self.kinematic_chain = t2m_body_hand_kinematic_chain_with_tips
         else:
             self.NO_ROOT_J = 51
+            self.n_raw_offsets = torch.from_numpy(t2m_raw_offsets).float()
+            self.kinematic_chain = t2m_body_hand_kinematic_chain
 
         self.I_ROOT0 = 0
         self.I_ROOT1 = 4
@@ -112,81 +107,70 @@ class NpyMotionInferenceDataset(Dataset):
         self.I_FEET0 = self.I_VEL1
         self.I_FEET1 = self.I_FEET0 + 4
 
-        # Skeleton
-        self.n_raw_offsets = (
-            torch.from_numpy(t2m_raw_offsets_with_tips).float()
-            if include_fingertips
-            else torch.from_numpy(t2m_raw_offsets).float()
-        )
-        self.kinematic_chain = (
-            t2m_body_hand_kinematic_chain_with_tips
-            if include_fingertips
-            else t2m_body_hand_kinematic_chain
-        )
+    def __len__(self):
+        return len(self.npy_files)
 
-        # kp -> kp52
-        if self.include_fingertips:
-            kp52_full = np.concatenate([kp[:, :22, :], kp[:, 25:55, :], kp[:, -10:, :]], axis=1)
+    def __getitem__(self, idx):
+        npy_path, take_name, sample_id = self.npy_files[idx]
+
+        kp = np.load(npy_path).astype(np.float32)  # [41, J, 3]
+        J = kp.shape[1]
+
+        # Handle different joint formats:
+        #   154 joints: EgoExo4D format (body[0:22] + jaw/eyes[22:25] + hands[25:55] + ...)
+        #    62 joints: SMPL-H + fingertips (body[0:22] + hands[22:52] + tips[52:62])
+        #    52 joints: SMPL-H (body[0:22] + hands[22:52])
+        if J == 154:
+            if self.include_fingertips:
+                kp52 = np.concatenate([kp[:, :22, :], kp[:, 25:55, :], kp[:, -10:, :]], axis=1)
+            else:
+                kp52 = np.concatenate([kp[:, :22, :], kp[:, 25:55, :]], axis=1)
+        elif J == 62:
+            kp52 = kp[:, :62, :] if self.include_fingertips else kp[:, :52, :]
+        elif J == 52:
+            kp52 = kp
         else:
-            kp52_full = np.concatenate([kp[:, :22, :], kp[:, 25:55, :]], axis=1)
+            raise ValueError(f"Unexpected joint count {J} in {npy_path}")
 
-        self.kp = kp
-        self.kp52_full = kp52_full
-        self.Tfull = int(kp52_full.shape[0])
+        # Pad or truncate to clip_len (should be exactly 41 from prepare_atomic_clips.py)
+        T = kp52.shape[0]
+        if T < self.clip_len:
+            pad = np.repeat(kp52[-1:, :, :], self.clip_len - T, axis=0)
+            kp52 = np.concatenate([kp52, pad], axis=0)
+        elif T > self.clip_len:
+            kp52 = kp52[:self.clip_len]
 
         # Target offsets from first frame
         tgt_skel = Skeleton(self.n_raw_offsets, self.kinematic_chain, "cpu")
-        self.tgt_offsets = tgt_skel.get_offsets_joints(torch.from_numpy(kp52_full[0]).float())
+        tgt_offsets = tgt_skel.get_offsets_joints(torch.from_numpy(kp52[0]).float())
 
-        # Number of clips
-        if self.Tfull <= self.clip_len:
-            self.n_clips = 1
-        else:
-            self.n_clips = math.ceil((self.Tfull - self.clip_len) / self.stride) + 1
-
-    def __len__(self):
-        return self.n_clips
-
-    def __getitem__(self, i: int):
-        L = self.clip_len
-        start = int(i) * self.stride
-        end = start + L
-
-        kp52 = self.kp52_full[start:end]
-        t = kp52.shape[0]
-        if t < L:
-            pad = np.repeat(kp52[-1:, :, :], L - t, axis=0)
-            kp52 = np.concatenate([kp52, pad], axis=0)
-
+        # kp3d -> motion representation (623D)
         arr = kp3d_to_motion_rep(
             kp3d_52_yup=kp52,
             feet_thre=self.feet_thre,
-            tgt_offsets=self.tgt_offsets,
+            tgt_offsets=tgt_offsets,
             n_raw_offsets=self.n_raw_offsets,
             kinematic_chain=self.kinematic_chain,
             base_idx=self.base_idx,
             hand_local=self.hand_local,
         )
 
-        # Split body/hand (same as MotionInferenceDataset)
+        # Split body/hand
         Tm1 = arr.shape[0]
+        root = arr[:, self.I_ROOT0:self.I_ROOT1]
+        ric = arr[:, self.I_RIC0:self.I_RIC1].reshape(Tm1, self.NO_ROOT_J, 3)
+        rot = arr[:, self.I_ROT0:self.I_ROT1].reshape(Tm1, self.NO_ROOT_J, 6)
+        vel = arr[:, self.I_VEL0:self.I_VEL1].reshape(Tm1, self.NO_ROOT_J + 1, 3)
+        feet = arr[:, self.I_FEET0:self.I_FEET1]
+
         if self.include_fingertips:
-            ric = arr[:, self.I_RIC0:self.I_RIC1].reshape(Tm1, self.NO_ROOT_J, 3)
-            rot = arr[:, self.I_ROT0:self.I_ROT1].reshape(Tm1, self.NO_ROOT_J, 6)
-            vel = arr[:, self.I_VEL0:self.I_VEL1].reshape(Tm1, self.NO_ROOT_J + 1, 3)
             ric_body, ric_hand = ric[:, :21], ric[:, 21:61]
             rot_body, rot_hand = rot[:, :21], rot[:, 21:61]
             vel_body, vel_hand = vel[:, :22], vel[:, 22:62]
         else:
-            ric = arr[:, self.I_RIC0:self.I_RIC1].reshape(Tm1, self.NO_ROOT_J, 3)
-            rot = arr[:, self.I_ROT0:self.I_ROT1].reshape(Tm1, self.NO_ROOT_J, 6)
-            vel = arr[:, self.I_VEL0:self.I_VEL1].reshape(Tm1, self.NO_ROOT_J + 1, 3)
             ric_body, ric_hand = ric[:, :21], ric[:, 21:51]
             rot_body, rot_hand = rot[:, :21], rot[:, 21:51]
             vel_body, vel_hand = vel[:, :22], vel[:, 22:52]
-
-        root = arr[:, self.I_ROOT0:self.I_ROOT1]
-        feet = arr[:, self.I_FEET0:self.I_FEET1]
 
         body = np.concatenate([
             root,
@@ -202,24 +186,34 @@ class NpyMotionInferenceDataset(Dataset):
         ], axis=1)
 
         return {
-            "clip_index": int(i),
-            "start": int(start),
-            "end": int(min(end, self.Tfull)),
-            "Tfull": int(self.Tfull),
-            "T": int(Tm1),
-            "body": torch.from_numpy(body).float(),
-            "hand": torch.from_numpy(hand).float(),
+            "mB": torch.from_numpy(body).float(),
+            "mH": torch.from_numpy(hand).float(),
+            "take_name": take_name,
+            "sample_id": sample_id,
+            "npy_path": npy_path,
         }
 
 
+def collate_atomic(batch):
+    """Custom collate: stack tensors, keep strings as lists."""
+    return {
+        "mB": torch.stack([b["mB"] for b in batch], dim=0),
+        "mH": torch.stack([b["mH"] for b in batch], dim=0),
+        "take_name": [b["take_name"] for b in batch],
+        "sample_id": [b["sample_id"] for b in batch],
+        "npy_path": [b["npy_path"] for b in batch],
+    }
+
+
 def load_valid_sample_ids(annotation_json):
-    """Load sample IDs that have at least one video (ego or exo) from the intermediate annotation."""
+    """Load sample IDs that have at least one video from the intermediate annotation."""
     import json as _json
     with open(annotation_json, "r") as f:
         entries = _json.load(f)
     valid = set()
     for entry in entries:
-        if "video_ego" in entry or "video_exo" in entry:
+        if ("video_ego" in entry or "video_exo" in entry or "video" in entry
+                or entry.get("_motion_ok") or "motion_kp3d" in entry):
             valid.add(entry["sample_id"])
     return valid
 
@@ -228,20 +222,29 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--split", choices=["train", "val"], default="train",
                     help="Dataset split (default: train)")
+    ap.add_argument("--data-root", type=str, default=None,
+                    help="Base egoexo directory "
+                         "(default: {DATA_ROOT}/{split}/takes_clipped/egoexo)")
     ap.add_argument("--config", type=str,
                     default=os.path.join(_HERE, "ckpt_vq/config.yaml"))
     ap.add_argument("--ckpt", type=str,
                     default=os.path.join(_HERE, "ckpt_vq/ckpt_best.pt"))
     ap.add_argument("--motion-dir", type=str, default=None,
-                    help="Directory of kp3d .npy files (default: {DATA_ROOT}/{split}/takes_clipped/egoexo/motion_atomic)")
+                    help="Directory of kp3d .npy files "
+                         "(default: {data-root}/motion_atomic)")
     ap.add_argument("--output-dir", type=str, default=None,
-                    help="Output directory for .npz token files (default: {DATA_ROOT}/{split}/takes_clipped/egoexo/tok_pose_atomic_40)")
+                    help="Output directory for .npz token files "
+                         "(default: {data-root}/tok_pose_atomic_40)")
     ap.add_argument("--annotation-json", type=str, default=None,
                     help="Intermediate annotation JSON from prepare_atomic_clips.py. "
-                         "Only samples with both ego and exo video will be processed.")
+                         "Only samples with ego or exo video will be processed.")
     ap.add_argument("--overwrite", action="store_true")
-    ap.add_argument("--clip-len", type=int, default=41)
-    ap.add_argument("--overlap", type=int, default=1)
+    ap.add_argument("--clip-len", type=int, default=41,
+                    help="Clip length in frames (41 = fixed output from prepare_atomic_clips.py)")
+    ap.add_argument("--batch-size", type=int, default=128,
+                    help="Batch size for inference (default: 128)")
+    ap.add_argument("--num-workers", type=int, default=8,
+                    help="Number of DataLoader workers (default: 8)")
     ap.add_argument("--recon", action="store_true",
                     help="Decode token IDs back to body pose and save GT-vs-Recon mp4.")
     ap.add_argument("--recon-dir", type=str,
@@ -255,18 +258,24 @@ def main():
     args = ap.parse_args()
 
     # Resolve split-dependent defaults
-    egoexo_dir = os.path.join(_DATA_ROOT, args.split, "takes_clipped", "egoexo")
+    if args.data_root is None:
+        args.data_root = os.path.join(_DATA_ROOT, args.split, "takes_clipped", "egoexo")
     if args.motion_dir is None:
-        args.motion_dir = os.path.join(egoexo_dir, "motion_atomic")
+        args.motion_dir = os.path.join(args.data_root, "motion_atomic")
     if args.output_dir is None:
-        args.output_dir = os.path.join(egoexo_dir, "tok_pose_atomic_40")
+        args.output_dir = os.path.join(args.data_root, "tok_pose_atomic_40")
     if args.annotation_json is None:
         suffix = "" if args.split == "train" else f"_{args.split}"
         args.annotation_json = os.path.join(
             _INTERNVIDEO_SCRIPT_DIR, f"annotation_atomic_intermediate{suffix}.json"
         )
 
-    # Load valid sample IDs (ego + exo both exist)
+    print(f"data_root:       {args.data_root}")
+    print(f"motion_dir:      {args.motion_dir}")
+    print(f"output_dir:      {args.output_dir}")
+    print(f"annotation_json: {args.annotation_json}")
+
+    # Load valid sample IDs (ego or exo exist)
     valid_ids = load_valid_sample_ids(args.annotation_json)
     print(f"Valid samples (ego+exo): {len(valid_ids)}")
 
@@ -275,7 +284,14 @@ def main():
     device = torch.device(cfg.device if torch.cuda.is_available() else "cpu")
     model = build_model_from_args(cfg, device)
     ckpt = torch.load(args.ckpt, map_location="cpu", weights_only=False)
-    model.load_state_dict(ckpt["model"])
+
+    # Handle DDP state_dict (module. prefix)
+    state_dict = ckpt["model"]
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        new_key = k.replace("module.", "") if k.startswith("module.") else k
+        new_state_dict[new_key] = v
+    model.load_state_dict(new_state_dict)
     model.eval()
 
     include_fingertips = cfg.get("include_fingertips", False)
@@ -289,7 +305,7 @@ def main():
     if normalize:
         mean_path = cfg.get("mean_path", "./preprocess/statistics/tips/mean.npy")
         std_path = cfg.get("std_path", "./preprocess/statistics/tips/std.npy")
-        mean_full = torch.from_numpy(np.load(mean_path)).float().to(device)  # (743,) or (623,)
+        mean_full = torch.from_numpy(np.load(mean_path)).float().to(device)
         std_full = torch.from_numpy(np.load(std_path)).float().to(device)
         body_dim = cfg.get("body_in_dim", 263)
         mean_B = mean_full[:body_dim]
@@ -298,94 +314,88 @@ def main():
         std_H = std_full[body_dim:]
         print(f"Normalization enabled: mean/std shape={mean_full.shape}")
 
-    recon_count = 0
-
-    # Find all kp3d .npy files, filter by valid IDs
+    # Scan .npy files, filter by valid IDs and already-processed
     all_npy = sorted(glob.glob(os.path.join(args.motion_dir, "**", "*_kp3d.npy"), recursive=True))
     npy_files = []
-    for p in all_npy:
-        sample_id = os.path.basename(p).replace("_kp3d.npy", "")
-        if sample_id in valid_ids:
-            npy_files.append(p)
-    print(f"Found {len(all_npy)} motion files, {len(npy_files)} with ego+exo video")
-
     skipped = 0
-    processed = 0
-
-    for npy_path in tqdm(npy_files, desc="Tokenizing motion"):
-        # Derive output path: motion_atomic/{take}/{id}_kp3d.npy -> tok_pose_atomic/{take}/{id}_{chunk}.npz
-        rel_path = os.path.relpath(npy_path, args.motion_dir)
+    for p in all_npy:
+        rel_path = os.path.relpath(p, args.motion_dir)
         take_name = os.path.dirname(rel_path)
         sample_id = os.path.basename(rel_path).replace("_kp3d.npy", "")
 
-        save_dir = os.path.join(args.output_dir, take_name)
-        os.makedirs(save_dir, exist_ok=True)
-
-        do_recon = args.recon and (args.recon_max <= 0 or recon_count < args.recon_max)
-
-        # Check if already processed (skip tokenization but still allow recon)
-        already_tokenized = False
-        if not args.overwrite:
-            existing = glob.glob(os.path.join(save_dir, f"{sample_id}_*.npz"))
-            if existing:
-                if not do_recon:
-                    skipped += 1
-                    continue
-                already_tokenized = True
-
-        try:
-            ds = NpyMotionInferenceDataset(
-                npy_path=npy_path,
-                clip_len=args.clip_len,
-                overlap=args.overlap,
-                include_fingertips=include_fingertips,
-                hand_local=hand_local,
-                base_idx=base_idx,
-            )
-        except (ValueError, KeyError) as e:
-            print(f"[skip] {npy_path}: {e}")
-            skipped += 1
+        if sample_id not in valid_ids:
             continue
 
-        dl = DataLoader(
-            ds,
-            batch_size=1,
-            shuffle=False,
-            num_workers=0,
-            pin_memory=True,
-            drop_last=False,
-            collate_fn=collate_stack,
-        )
+        if not args.overwrite:
+            save_dir = os.path.join(args.output_dir, take_name)
+            if glob.glob(os.path.join(save_dir, f"{sample_id}_*.npz")):
+                skipped += 1
+                continue
 
-        with torch.no_grad():
-            for batch in dl:
-                chunk_idx = batch["clip_index"].item()
-                save_path = os.path.join(save_dir, f"{sample_id}_{chunk_idx:04d}.npz")
+        npy_files.append((p, take_name, sample_id))
 
-                mB_raw = batch["mB"].to(device)
-                mH_raw = batch["mH"].to(device)
+    print(f"Found {len(all_npy)} motion files, {len(npy_files)} to process, {skipped} already done")
 
-                # Normalize before feeding to model
-                if normalize:
-                    mB = (mB_raw - mean_B) / (std_B + 1e-8)
-                    mH = (mH_raw - mean_H) / (std_H + 1e-8)
-                else:
-                    mB, mH = mB_raw, mH_raw
+    if not npy_files:
+        print("Nothing to process.")
+        return
 
-                recon, losses, idx = model(mB, mH)
+    # Create dataset and dataloader
+    ds = NpyMotionAtomicBatchDataset(
+        npy_files=npy_files,
+        clip_len=args.clip_len,
+        include_fingertips=include_fingertips,
+        hand_local=hand_local,
+        base_idx=base_idx,
+    )
+    dl = DataLoader(
+        ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=False,
+        collate_fn=collate_atomic,
+    )
 
-                idxH = idx["idxH"].detach().cpu().numpy()
-                idxB = idx["idxB"].detach().cpu().numpy()
-                combined = np.concatenate([idxB, idxH], axis=-1)
+    processed = 0
+    recon_count = 0
 
-                if not already_tokenized:
-                    np.savez_compressed(save_path, idx=combined)
+    with torch.no_grad():
+        for batch in tqdm(dl, desc="Tokenizing motion"):
+            mB_raw = batch["mB"].to(device)
+            mH_raw = batch["mH"].to(device)
+
+            # Normalize before feeding to model
+            if normalize:
+                mB = (mB_raw - mean_B) / (std_B + 1e-8)
+                mH = (mH_raw - mean_H) / (std_H + 1e-8)
+            else:
+                mB, mH = mB_raw, mH_raw
+
+            _, _, idx = model(mB, mH)
+
+            idxB = idx["idxB"].detach().cpu().numpy()
+            idxH = idx["idxH"].detach().cpu().numpy()
+            combined = np.concatenate([idxB, idxH], axis=-1)  # (B, T, 8)
+
+            B = combined.shape[0]
+            for i in range(B):
+                take_name = batch["take_name"][i]
+                sample_id = batch["sample_id"][i]
+
+                save_dir = os.path.join(args.output_dir, take_name)
+                os.makedirs(save_dir, exist_ok=True)
+                save_path = os.path.join(save_dir, f"{sample_id}_0000.npz")
+
+                np.savez_compressed(save_path, idx=combined[i:i+1])  # keep (1, T, 8) shape
+                processed += 1
 
                 # --recon: decode IDs -> joints -> mp4
-                if do_recon:
+                if args.recon and (args.recon_max <= 0 or recon_count < args.recon_max):
                     pr_n = model.decode_from_ids(
-                        idxH=torch.from_numpy(idxH).to(device).long(),
-                        idxB=torch.from_numpy(idxB).to(device).long(),
+                        idxH=torch.from_numpy(idxH[i:i+1]).to(device).long(),
+                        idxB=torch.from_numpy(idxB[i:i+1]).to(device).long(),
                     )
                     # Denormalize decoded output
                     if normalize:
@@ -399,25 +409,27 @@ def main():
                     pr_full = reconstruct_623_from_body_hand(pr_body, pr_hand, include_fingertips)
 
                     # GT: use raw (unnormalized) data
-                    gt_full = reconstruct_623_from_body_hand(mB_raw, mH_raw, include_fingertips)
+                    gt_full = reconstruct_623_from_body_hand(
+                        mB_raw[i:i+1], mH_raw[i:i+1], include_fingertips
+                    )
 
-                    # recover 3D joint positions
+                    # Recover 3D joint positions
                     j_pr = recover_from_ric(
                         pr_full, joints_num,
                         use_root_loss=use_root_loss,
                         base_idx=base_idx,
                         hand_local=hand_local,
-                    )[0]  # (T, J, 3)
+                    )[0]
                     j_gt = recover_from_ric(
                         gt_full, joints_num,
                         use_root_loss=use_root_loss,
                         base_idx=base_idx,
                         hand_local=hand_local,
-                    )[0]  # (T, J, 3)
+                    )[0]
 
-                    # save mp4
+                    # Save mp4
                     recon_sub = os.path.join(args.recon_dir, take_name)
-                    mp4_path = os.path.join(recon_sub, f"{sample_id}_{chunk_idx:04d}.mp4")
+                    mp4_path = os.path.join(recon_sub, f"{sample_id}_0000.mp4")
                     visualize_two_motions(
                         j_gt, j_pr,
                         save_path=mp4_path,
@@ -430,12 +442,8 @@ def main():
                         only_gt=False,
                     )
                     recon_count += 1
-                    if args.recon_max > 0 and recon_count >= args.recon_max:
-                        do_recon = False
 
-        processed += 1
-
-    print(f"\nProcessed: {processed}, Skipped: {skipped}")
+    print(f"\nProcessed: {processed}, Skipped (already done): {skipped}")
     if args.recon:
         print(f"Reconstruction mp4 saved: {recon_count} (dir: {args.recon_dir})")
 

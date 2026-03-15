@@ -24,6 +24,7 @@ def visualize_two_motions(
     only_gt=False,
     origin_align=True,
     base_idx=0,
+    metrics_overlay=None,
 ):
     """
     j_gt, j_pr: (T, J, 3) world coords (x,y,z), y-up.
@@ -86,12 +87,12 @@ def visualize_two_motions(
                 (20, 31), (31, 32), (32, 33), (33, 55), # ring
                 (20, 34), (34, 35), (35, 36), (36, 52), # thumb
 
-                # right hand (wrist=21), 37..51 + tips (-5..-1)
-                (21, 37), (37, 38), (38, 39), (39, 58),
-                (21, 40), (40, 41), (41, 42), (42, 59),
-                (21, 43), (43, 44), (44, 45), (45, 60),
-                (21, 46), (46, 47), (47, 48), (48, 61),
-                (21, 49), (49, 50), (50, 51), (51, 57),
+                # right hand (wrist=21), 37..51 + tips
+                (21, 37), (37, 38), (38, 39), (39, 58),  # index
+                (21, 40), (40, 41), (41, 42), (42, 59),  # middle
+                (21, 43), (43, 44), (44, 45), (45, 61),  # pinky
+                (21, 46), (46, 47), (47, 48), (48, 60),  # ring
+                (21, 49), (49, 50), (50, 51), (51, 57),  # thumb
             ]
         else:
             edges = [
@@ -285,6 +286,39 @@ def visualize_two_motions(
 
     ax.view_init(elev=15, azim=45)
 
+    # ---------- metrics overlay ----------
+    _overlay_parts = None
+    _dyn_text = None
+    if metrics_overlay is not None and not only_gt:
+        # determine which parts to show based on view
+        _view_to_parts = {
+            "all": ["all", "body", "lh", "rh"],
+            "body": ["body"],
+            "hands": ["lh", "rh"],
+            "lh": ["lh"],
+            "rh": ["rh"],
+        }
+        _overlay_parts = _view_to_parts.get(view, ["all"])
+        _bbox = dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7)
+
+        # static text (top-left)
+        _static = metrics_overlay.get("static", {})
+        _lines = []
+        for metric_name in ["WA-MPJPE", "W-MPJPE"]:
+            vals = _static.get(metric_name, {})
+            parts_str = "  ".join(f"{p}={vals[p]:.1f}" for p in _overlay_parts if p in vals)
+            if parts_str:
+                _lines.append(f"{metric_name}(mm): {parts_str}")
+        if _lines:
+            fig.text(0.02, 0.97, "\n".join(_lines), fontsize=7,
+                     fontfamily="monospace", verticalalignment="top",
+                     bbox=_bbox, transform=fig.transFigure)
+
+        # dynamic text placeholder (bottom-left)
+        _dyn_text = fig.text(0.02, 0.03, "", fontsize=7,
+                             fontfamily="monospace", verticalalignment="bottom",
+                             bbox=_bbox, transform=fig.transFigure)
+
     BASE_AZIM = 45
     ROT_DEG_PER_STEP = 2.0
 
@@ -337,17 +371,32 @@ def visualize_two_motions(
         if rotate:
             ax.view_init(elev=15, azim=BASE_AZIM + ROT_DEG_PER_STEP * t)
 
+        # update dynamic metrics overlay
+        if _dyn_text is not None and _overlay_parts is not None:
+            _dyn = metrics_overlay.get("dynamic", {})
+            _dyn_lines = []
+            for metric_name, vals in _dyn.items():
+                parts_str = "  ".join(
+                    f"{p}={vals[p][t]:.1f}" for p in _overlay_parts if p in vals
+                )
+                if parts_str:
+                    _dyn_lines.append(f"{metric_name}(mm): {parts_str}")
+            _dyn_text.set_text("\n".join(_dyn_lines))
+
         ax.set_title(f"{title}  frame={t}/{T-1}  view={view}")
         artists = [gt_sc] + gt_lines + gt_txts
         if not only_gt:
             artists += [pr_sc] + pr_lines + pr_txts
+        if _dyn_text is not None:
+            artists.append(_dyn_text)
         return artists
 
     ani = FuncAnimation(fig, update, frames=T, interval=1000 / fps, blit=False)
 
     os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
     if save_path.endswith(".mp4"):
-        ani.save(save_path, writer="ffmpeg", fps=fps)
+        ani.save(save_path, writer="ffmpeg", fps=fps,
+                 extra_args=["-c:v", "libx264", "-pix_fmt", "yuv420p"])
     elif save_path.endswith(".gif"):
         ani.save(save_path, writer="pillow", fps=fps)
     else:

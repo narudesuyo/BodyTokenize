@@ -2,11 +2,14 @@ import torch
 import sys
 sys.path.append(".")
 import numpy as np
-from src.evaluate.utils import reconstruct_623_from_body_hand, recover_from_ric
+from src.evaluate.utils import recover_joints_from_body_hand
 from src.evaluate.vis import visualize_two_motions
+from src.evaluate.evaluator import _compute_sample_metrics, _source_from_key
 from src.evaluate.metric import (
     codebook_stats,
     batch_procrustes_align,
+    batch_procrustes_align_sequence,
+    w_align_firstk,
     mpjpe_bt,
     wa_mpjpe,
     w_mpjpe_firstk,
@@ -90,27 +93,63 @@ def evaluate_model(
 
         sums["feat_mse"] += torch.mean((pr_dn - gt_dn) ** 2).item()
 
-        gt_rec = reconstruct_623_from_body_hand(gt_dn[..., :263], gt_dn[..., 263:], include_fingertips=args.include_fingertips)
-        pr_rec = reconstruct_623_from_body_hand(pr_dn[..., :263], pr_dn[..., 263:], include_fingertips=args.include_fingertips)
-
         joints_num = 52 if not args.include_fingertips else 62
-        j_gt = recover_from_ric(gt_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True), base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
-        j_pr = recover_from_ric(pr_rec, joints_num=joints_num, use_root_loss=getattr(args, "use_root_loss", True), base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
+        _hand_root_dim_total = getattr(args, "hand_root_dim", 9) * 2 if getattr(args, "hand_root", False) else 0
+        j_gt = recover_joints_from_body_hand(
+            gt_dn[..., :263], gt_dn[..., 263:],
+            include_fingertips=args.include_fingertips,
+            hand_root_dim=_hand_root_dim_total,
+            joints_num=joints_num,
+            use_root_loss=getattr(args, "use_root_loss", True),
+            base_idx=args.base_idx,
+            hand_local=getattr(args, "hand_local", False),
+            hand_only=getattr(args, "hand_only", False),
+        )
+        j_pr = recover_joints_from_body_hand(
+            pr_dn[..., :263], pr_dn[..., 263:],
+            include_fingertips=args.include_fingertips,
+            hand_root_dim=_hand_root_dim_total,
+            joints_num=joints_num,
+            use_root_loss=getattr(args, "use_root_loss", True),
+            base_idx=args.base_idx,
+            hand_local=getattr(args, "hand_local", False),
+            hand_only=getattr(args, "hand_only", False),
+        )
 
         if vis and it < num_save_samples:
             view_names = ["all", "body", "hands", "lh", "rh"]
+            _only_gt = True if args.eval_check and not args.resume else False
+            j_pr_wa = batch_procrustes_align_sequence(j_pr, j_gt)
+            j_pr_w = w_align_firstk(j_pr, j_gt, num_align_frames=1)
+            j_pr_hpa = j_pr_wa.clone()
+            j_pr_hpa[..., 22:, :] = batch_procrustes_align(
+                j_pr[..., 22:, :], j_gt[..., 22:, :])
+            _hand_views = {"hands", "lh", "rh"}
+            _view_align = {}
+            for vn in view_names:
+                if vn in _hand_views:
+                    _view_align[vn] = [("PA_hand", j_pr_hpa)]
+                else:
+                    _view_align[vn] = [("WA", j_pr_wa), ("W", j_pr_w)]
+            keys = batch.get("keys", None)
+            key_0 = keys[0] if isinstance(keys, list) and len(keys) > 0 else ""
+            _jg_vis = j_gt[0]
             for vname in view_names:
-                visualize_two_motions(
-                    j_gt[0], j_pr[0],
-                    save_path=f"{viz_dir}/{it:03d}/{vname}.mp4",
-                    fps=fps,
-                    view=vname,
-                    rotate=False,
-                    include_fingertips=args.include_fingertips,
-                    only_gt=True if args.eval_check and not args.resume else False,
-                    origin_align=True,
-                    base_idx=args.base_idx,
-                )
+                for aname, j_pr_a in _view_align[vname]:
+                    _jp_vis = j_pr_a[0]
+                    _mo = None if _only_gt else _compute_sample_metrics(_jg_vis, _jp_vis, parts)
+                    visualize_two_motions(
+                        _jg_vis, _jp_vis,
+                        save_path=f"{viz_dir}/{it:03d}/{aname}/{vname}.mp4",
+                        fps=fps,
+                        view=vname,
+                        rotate=False,
+                        include_fingertips=args.include_fingertips,
+                        only_gt=_only_gt,
+                        origin_align=True,
+                        base_idx=args.base_idx,
+                        metrics_overlay=_mo,
+                    )
 
         for name, slc in parts.items():
             jp_part = j_pr[..., slc, :]

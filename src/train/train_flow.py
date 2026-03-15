@@ -2,7 +2,7 @@ import sys
 sys.path.append(".")
 
 from src.dataset.dataloader import MotionDataset
-from src.evaluate.utils import reconstruct_623_from_body_hand, recover_from_ric
+from src.evaluate.utils import recover_joints_from_body_hand
 from src.evaluate.vis import visualize_two_motions
 from src.dataset.collate import collate_stack
 from src.util.utils import count_params, set_seed, compute_part_losses
@@ -164,6 +164,8 @@ def main():
 
     # ===== wandb =====
     wandb.init(project=args.project, name=args.name, config=OmegaConf.to_container(args, resolve=True))
+    wandb.define_metric("epoch")
+    wandb.define_metric("*", step_metric="epoch")
 
     # ===== normalization =====
     use_norm = getattr(args, "normalize", False)
@@ -246,10 +248,26 @@ def main():
                         pr_dn = pr
                         gt_dn = target
 
-                    gt_623 = reconstruct_623_from_body_hand(gt_dn[:, :, :263], gt_dn[:, :, 263:])
-                    pred_623 = reconstruct_623_from_body_hand(pr_dn[:, :, :263], pr_dn[:, :, 263:])
-                    gt_joints = recover_from_ric(gt_623, joints_num=52, base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
-                    pred_joints = recover_from_ric(pred_623, joints_num=52, base_idx=args.base_idx, hand_local=getattr(args, "hand_local", False))
+                    _hand_root_dim_total = getattr(args, "hand_root_dim", 9) * 2 if getattr(args, "hand_root", False) else 0
+                    _joints_num = 62 if getattr(args, "include_fingertips", False) else 52
+                    gt_joints = recover_joints_from_body_hand(
+                        gt_dn[:, :, :263], gt_dn[:, :, 263:],
+                        include_fingertips=getattr(args, "include_fingertips", False),
+                        hand_root_dim=_hand_root_dim_total,
+                        joints_num=_joints_num,
+                        base_idx=args.base_idx,
+                        hand_local=getattr(args, "hand_local", False),
+                        hand_only=getattr(args, "hand_only", False),
+                    )
+                    pred_joints = recover_joints_from_body_hand(
+                        pr_dn[:, :, :263], pr_dn[:, :, 263:],
+                        include_fingertips=getattr(args, "include_fingertips", False),
+                        hand_root_dim=_hand_root_dim_total,
+                        joints_num=_joints_num,
+                        base_idx=args.base_idx,
+                        hand_local=getattr(args, "hand_local", False),
+                        hand_only=getattr(args, "hand_only", False),
+                    )
 
                     gt_joints = gt_joints - gt_joints[..., :1, :]
                     pred_joints = pred_joints - pred_joints[..., :1, :]
@@ -279,7 +297,8 @@ def main():
                 if part_losses:
                     log.update({k: float(v.detach()) for k, v in part_losses.items()})
 
-                wandb.log(log, step=global_step)
+                log["epoch"] = epoch
+                wandb.log(log)
 
             global_step += 1
 
@@ -345,7 +364,8 @@ def main():
                 f"B usage/ppl={metrics['EVAL/CODEBOOK/B_usage']:.3f}/{metrics['EVAL/CODEBOOK/B_ppl']:.1f}"
             )
 
-            wandb.log(metrics, step=global_step)
+            metrics["epoch"] = epoch
+            wandb.log(metrics)
 
             # ===== best checkpoint =====
             cur_metric = metrics["EVAL/WA_MPJPE/all(mm)"]
@@ -366,7 +386,7 @@ def main():
 
             model.train()
 
-        wandb.log({"epoch_time_sec": time.time() - t0}, step=global_step)
+        wandb.log({"epoch": epoch, "epoch_time_sec": time.time() - t0})
 
     wandb.finish()
 

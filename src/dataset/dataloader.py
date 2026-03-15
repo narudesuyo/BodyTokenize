@@ -29,10 +29,14 @@ class MotionDataset(Dataset):
         base_idx: int = 0,
         hand_local: bool = False,
         use_cache: bool = False,
+        hand_root: bool = False,
+        hand_only: bool = False,
     ):
         self.base_idx = base_idx
         self.hand_local = hand_local
         self.use_cache = use_cache
+        self.hand_root = hand_root
+        self.hand_only = hand_only
         super().__init__()
         self.pt_path = pt_path
         self.to_torch = to_torch
@@ -153,14 +157,31 @@ class MotionDataset(Dataset):
                 s = 0
                 target_len = Tfull
 
+            body_t = torch.from_numpy(body).float() if self.to_torch else body
+            hand_t = torch.from_numpy(hand).float() if self.to_torch else hand
+
+            # hand_only mode: zero out body
+            if self.hand_only:
+                body_t = torch.zeros_like(body_t) if self.to_torch else np.zeros_like(body)
+
             out = {
                 "key": key,
                 "T": int(body.shape[0]),
-                "body": torch.from_numpy(body).float() if self.to_torch else body,
-                "hand": torch.from_numpy(hand).float() if self.to_torch else hand,
+                "body": body_t,
+                "hand": hand_t,
                 "start": int(s),
                 "Tfull": int(Tfull),
             }
+
+            # Pass through wrist world positions if available (HOT3D)
+            for meta_key in ("lh_wrist_world", "rh_wrist_world"):
+                if meta_key in item:
+                    mv = item[meta_key]
+                    if torch.is_tensor(mv):
+                        mv = mv.numpy()
+                    mv = mv[s:s + target_len]
+                    out[meta_key] = torch.from_numpy(mv).float() if self.to_torch else mv
+
             return out
 
         raise RuntimeError("Too many invalid samples in cache.")
@@ -245,7 +266,7 @@ class MotionDataset(Dataset):
                 #             f"start={s} try={s_try}\n  {repr(e)}"
                 #         )
                 #     continue
-                arr = kp3d_to_motion_rep(
+                _result = kp3d_to_motion_rep(
                     kp3d_52_yup=kp52,
                     feet_thre=self.feet_thre,
                     tgt_offsets=self.tgt_offsets,
@@ -253,7 +274,12 @@ class MotionDataset(Dataset):
                     kinematic_chain=self.kinematic_chain,
                     base_idx=self.base_idx,
                     hand_local=self.hand_local,
+                    compute_hand_root=self.hand_root,
                 )
+                if self.hand_root:
+                    arr, lh_root, rh_root = _result
+                else:
+                    arr = _result
 
                 # ---------- NaN check (arr) ----------
                 if np.isnan(arr).any() or np.isinf(arr).any():
@@ -287,12 +313,15 @@ class MotionDataset(Dataset):
                     feet],
                     axis=1
                 )
-                hand = np.concatenate(
-                    [ric_hand.reshape(Tm1, -1),
+                hand_parts = []
+                if self.hand_root:
+                    hand_parts.extend([lh_root, rh_root])  # (Tm1, 9) each
+                hand_parts.extend([
+                    ric_hand.reshape(Tm1, -1),
                     rot_hand.reshape(Tm1, -1),
-                    vel_hand.reshape(Tm1, -1)],
-                    axis=1
-                )
+                    vel_hand.reshape(Tm1, -1),
+                ])
+                hand = np.concatenate(hand_parts, axis=1)
 
                 # ---------- NaN check (final) ----------
                 if (

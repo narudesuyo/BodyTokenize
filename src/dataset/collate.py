@@ -17,4 +17,16 @@ def collate_stack(batch):
         out["Tfull"] = torch.tensor([b["Tfull"] for b in batch], dtype=torch.long)
     if "clip_index" in batch[0]:
         out["clip_index"] = torch.tensor([b["clip_index"] for b in batch], dtype=torch.long)
+    # HOT3D wrist world positions (only present for hand-only samples)
+    # Check if ANY sample in the batch has wrist world data
+    for wk in ("lh_wrist_world", "rh_wrist_world"):
+        if any(wk in b for b in batch):
+            T = body.shape[1]
+            parts = []
+            for b in batch:
+                if wk in b:
+                    parts.append(b[wk])
+                else:
+                    parts.append(torch.zeros(T, 3))
+            out[wk] = torch.stack(parts, dim=0)
     return out

@@ -1,3 +1,10 @@
+# ============================================================
+# DEPRECATED: This file is kept for backward compatibility with
+# existing checkpoints. For new training, use:
+#   from src.model.vqvae import H2VQ
+#   model = H2VQ(..., decoder_type="flow", ...)
+# ============================================================
+
 # import math
 # import torch
 # import torch.nn as nn

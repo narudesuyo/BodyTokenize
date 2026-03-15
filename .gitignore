@@ -9,8 +9,10 @@ __pycache__/
 *.mp4
 wandb/
 nohup.out
+nohup_*.log
 runs/
 backup/
+data/
 *.png
 *.jpg
 ./ckpts/

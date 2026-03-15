@@ -50,7 +50,7 @@ from tqdm import tqdm
 from src.dataset.dataloader import MotionDataset
 from src.dataset.collate import collate_stack
 from src.train.utils import build_model_from_args
-from src.evaluate.utils import reconstruct_623_from_body_hand, recover_from_ric
+from src.evaluate.utils import recover_joints_from_body_hand
 from src.evaluate.vis import visualize_two_motions
 from src.evaluate.metric import (
     codebook_stats,
@@ -218,20 +218,28 @@ def evaluate_cross_modal(
 
         sums["feat_mse"] += torch.mean((pr623 - gt623) ** 2).item()
 
-        gt_rec = reconstruct_623_from_body_hand(gt623[..., :263], gt623[..., 263:],
-                                                 include_fingertips=args.include_fingertips)
-        pr_rec = reconstruct_623_from_body_hand(pr623[..., :263], pr623[..., 263:],
-                                                 include_fingertips=args.include_fingertips)
-
         joints_num = 62 if args.include_fingertips else 52
-        j_gt = recover_from_ric(gt_rec, joints_num=joints_num,
-                                use_root_loss=getattr(args, "use_root_loss", True),
-                                base_idx=args.base_idx,
-                                hand_local=getattr(args, "hand_local", False))
-        j_pr = recover_from_ric(pr_rec, joints_num=joints_num,
-                                use_root_loss=getattr(args, "use_root_loss", True),
-                                base_idx=args.base_idx,
-                                hand_local=getattr(args, "hand_local", False))
+        _hand_root_dim_total = getattr(args, "hand_root_dim", 9) * 2 if getattr(args, "hand_root", False) else 0
+        j_gt = recover_joints_from_body_hand(
+            gt623[..., :263], gt623[..., 263:],
+            include_fingertips=args.include_fingertips,
+            hand_root_dim=_hand_root_dim_total,
+            joints_num=joints_num,
+            use_root_loss=getattr(args, "use_root_loss", True),
+            base_idx=args.base_idx,
+            hand_local=getattr(args, "hand_local", False),
+            hand_only=getattr(args, "hand_only", False),
+        )
+        j_pr = recover_joints_from_body_hand(
+            pr623[..., :263], pr623[..., 263:],
+            include_fingertips=args.include_fingertips,
+            hand_root_dim=_hand_root_dim_total,
+            joints_num=joints_num,
+            use_root_loss=getattr(args, "use_root_loss", True),
+            base_idx=args.base_idx,
+            hand_local=getattr(args, "hand_local", False),
+            hand_only=getattr(args, "hand_only", False),
+        )
 
         if vis and it < num_save_samples:
             for vname in ["all", "body", "hands", "lh", "rh"]:

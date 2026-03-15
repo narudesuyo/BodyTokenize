@@ -1,15 +1,89 @@
 import torch
+import numpy as np
 from src.model.vqvae import H2VQ
 import os
+
+
+def compute_norm_stats(cache_pt_path, body_dim=263, root_dim=1, stats_cache_dir=None):
+    """
+    Compute mean/std from a precomputed cache .pt file.
+    - Body stats exclude hand-only samples (body=zeros, e.g. HOT3D).
+    - Root dims (body[:root_dim]) are set to mean=0, std=1 (no normalization).
+    - If stats_cache_dir is given, saves/loads .npy files there.
+
+    Returns: (mean, std) as torch.Tensor of shape (body_dim + hand_dim,)
+    """
+    # Check cache
+    if stats_cache_dir is not None:
+        mean_path = os.path.join(stats_cache_dir, "mean.npy")
+        std_path = os.path.join(stats_cache_dir, "std.npy")
+        if os.path.exists(mean_path) and os.path.exists(std_path):
+            mean = torch.from_numpy(np.load(mean_path)).float()
+            std = torch.from_numpy(np.load(std_path)).float()
+            print(f"[NormStats] Loaded cached stats from {stats_cache_dir} (dim={mean.shape[0]})")
+            return mean, std
+
+    print(f"[NormStats] Computing from {cache_pt_path} ...")
+    cache = torch.load(cache_pt_path, weights_only=False)
+
+    body_list = []
+    hand_list = []
+    for item in cache.values():
+        mB = item["body"]   # (T, body_dim)
+        mH = item["hand"]   # (T, hand_dim)
+        hand_list.append(mH)
+        if mB.abs().sum() > 0:  # exclude body=zeros (HOT3D)
+            body_list.append(mB)
+
+    body_cat = torch.cat(body_list, dim=0).float()
+    hand_cat = torch.cat(hand_list, dim=0).float()
+
+    body_mean = body_cat.mean(dim=0).numpy()
+    body_std = body_cat.std(dim=0).numpy()
+    hand_mean = hand_cat.mean(dim=0).numpy()
+    hand_std = hand_cat.std(dim=0).numpy()
+
+    # Constant dims (std ≈ 0): skip normalization (set mean=0, std=1)
+    body_const = body_std < 1e-5
+    hand_const = hand_std < 1e-5
+    body_mean[body_const] = 0.0
+    body_std[body_const] = 1.0
+    hand_mean[hand_const] = 0.0
+    hand_std[hand_const] = 1.0
+
+    # Clamp remaining std
+    body_std = np.clip(body_std, 1e-6, None)
+    hand_std = np.clip(hand_std, 1e-6, None)
+
+    # Root: no normalization
+    body_mean[:root_dim] = 0.0
+    body_std[:root_dim] = 1.0
+
+    mean_full = np.concatenate([body_mean, hand_mean])
+    std_full = np.concatenate([body_std, hand_std])
+
+    print(f"[NormStats] body samples={len(body_list)}, hand samples={len(hand_list)}, dim={mean_full.shape[0]}")
+
+    # Save cache
+    if stats_cache_dir is not None:
+        os.makedirs(stats_cache_dir, exist_ok=True)
+        np.save(os.path.join(stats_cache_dir, "mean.npy"), mean_full)
+        np.save(os.path.join(stats_cache_dir, "std.npy"), std_full)
+        print(f"[NormStats] Saved to {stats_cache_dir}")
+
+    return torch.from_numpy(mean_full).float(), torch.from_numpy(std_full).float()
 def build_model_from_args(args, device):
-    if args.include_fingertips:
-        body_in_dim = 263
-        hand_in_dim = 480
+    _hand_root = getattr(args, "hand_root", False)
+    if hasattr(args, "hand_in_dim"):
+        hand_in_dim = args.hand_in_dim
+    elif args.include_fingertips:
+        hand_in_dim = 498 if _hand_root else 480
     else:
-        body_in_dim = 263
-        hand_in_dim = 360
+        hand_in_dim = 378 if _hand_root else 360
+    body_in_dim = getattr(args, "body_in_dim", 263)
+
     model = H2VQ(
-        T=args.T, 
+        T=args.T,
         body_in_dim=body_in_dim,
         hand_in_dim=hand_in_dim,
         code_dim=args.code_dim,
@@ -20,8 +94,8 @@ def build_model_from_args(args, device):
         hand_tokens_per_t=args.hand_tokens_per_t,
         body_down=args.body_down,
         hand_down=args.hand_down,
-        enc_type_B=args.enc_type_B,  # "xformer" or "cnn"
-        enc_type_H=args.enc_type_H,  # "xformer" or "cnn"
+        enc_type_B=args.enc_type_B,
+        enc_type_H=args.enc_type_H,
         enc_use_attn_B=args.enc_use_attn_B,
         enc_use_attn_H=args.enc_use_attn_H,
         enc_depth=args.enc_depth,
@@ -44,9 +118,48 @@ def build_model_from_args(args, device):
         split_hands=getattr(args, "split_hands", False),
         alpha_root=args.alpha_root,
         alpha_body=args.alpha_body,
-        alpha_hand=args.alpha_hand,        
+        alpha_hand=args.alpha_hand,
         use_root_loss=args.use_root_loss,
         include_fingertips=args.include_fingertips,
+        alpha_joints=getattr(args, "alpha_joints", 0.0),
+        alpha_joints_hand=getattr(args, "alpha_joints_hand", 0.0),
+        alpha_bone_length=getattr(args, "alpha_bone_length", 0.0),
+        base_idx=getattr(args, "base_idx", 0),
+        hand_local=getattr(args, "hand_local", False),
+        # NEW params
+        hand_root=_hand_root,
+        hand_root_dim=getattr(args, "hand_root_dim", 9),
+        use_fuse=getattr(args, "use_fuse", True),
+        use_token_separation=getattr(args, "use_token_separation", False),
+        body_root_tokens_per_t=getattr(args, "body_root_tokens_per_t", 1),
+        body_local_tokens_per_t=getattr(args, "body_local_tokens_per_t", 3),
+        hand_root_tokens_per_t=getattr(args, "hand_root_tokens_per_t", 1),
+        hand_local_tokens_per_t=getattr(args, "hand_local_tokens_per_t", 3),
+        use_three_decoders=getattr(args, "use_three_decoders", False),
+        alpha_body_dec=getattr(args, "alpha_body_dec", 1.0),
+        alpha_hand_dec=getattr(args, "alpha_hand_dec", 1.0),
+        alpha_full_dec=getattr(args, "alpha_full_dec", 1.0),
+        use_hand_traj_token=getattr(args, "use_hand_traj_token", False),
+        hand_only=getattr(args, "hand_only", False),
+        # decoder type (regressor | flow | diffusion)
+        decoder_type=getattr(args, "decoder_type", "regressor"),
+        flow_model_dim=getattr(args, "flow_model_dim", 256),
+        flow_depth=getattr(args, "flow_depth", 8),
+        flow_heads=getattr(args, "flow_heads", 8),
+        flow_mlp_ratio=getattr(args, "flow_mlp_ratio", 4.0),
+        flow_drop=getattr(args, "flow_drop", 0.0),
+        flow_attn_drop=getattr(args, "flow_attn_drop", 0.0),
+        flow_t_dim=getattr(args, "flow_t_dim", 512),
+        flow_use_rope=getattr(args, "flow_use_rope", False),
+        flow_cond_type=getattr(args, "flow_cond_type", "baseline"),
+        lambda_flow=getattr(args, "lambda_flow", 1.0),
+        lambda_entropy=getattr(args, "lambda_entropy", 1e-3),
+        mask_input_dims=getattr(args, "mask_input_dims", True),
+        flow_sample_steps=getattr(args, "flow_sample_steps", 30),
+        flow_solver=getattr(args, "flow_solver", "heun"),
+        # diffusion-specific
+        diffusion_timesteps=getattr(args, "diffusion_timesteps", 1000),
+        diffusion_schedule=getattr(args, "diffusion_schedule", "cosine"),
     ).to(device)
     return model
 
